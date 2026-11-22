@@ -1,0 +1,36 @@
+services:
+  robot-controller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: so101-robot-controller
+    env_file:
+      - .env
+    volumes:
+      - ./config:/app/config
+      - ./.cache/lerobot:/root/.cache/huggingface/lerobot
+      - ./assets:/app/assets
+    # Uncomment verified host devices after Phases 2 & 3 (docker-compose run --no-deps first):
+    # devices:
+    #   - /dev/so101_follower:/dev/so101_follower
+    #   - /dev/video0:/dev/video0
+    #   - /dev/video2:/dev/video2
+    networks:
+      - ventuno-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Local AI Voice Assistant Services (Seed once via Arduino App Lab!)
+  # Run App Lab's "Local AI Voice Assistant" once on the VENTUNO Q, then copy
+  # the generated ghcr.io/arduino/app-bricks/ service blocks (including
+  # /dev/fastrpc-* devices, /usr/lib/dsp, /lib/firmware, and ADSP_LIBRARY_PATH)
+  # from App Lab's generated .cache/app-compose.yaml below.
+  # ---------------------------------------------------------------------------
+  # keyword-spotting: ...
+  # whisper-asr: ...
+  # gemma-llm: ...
+  # local-tts: ...
+
+networks:
+  ventuno-net:
+    driver: bridge

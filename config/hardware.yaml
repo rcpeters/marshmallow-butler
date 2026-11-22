@@ -1,0 +1,92 @@
+# Hardware, camera, calibration, and safety configuration for SO-101 + VENTUNO Q
+
+arm:
+  port: "${SO101_FOLLOWER_PORT:-/dev/so101_follower}"
+  id: "${SO101_FOLLOWER_ID:-so101_follower_main}"
+  urdf_path: "assets/so101/so101_new_calib.urdf"
+  control_hz: 30
+  move_duration_s: 1.4
+  # Neutral park pose in degrees (matches LeRobot SO101Follower joint keys)
+  home_pose_deg:
+    shoulder_pan: 0.0
+    shoulder_lift: -35.0
+    elbow_flex: 75.0
+    wrist_flex: 40.0
+    wrist_roll: 0.0
+    gripper: 70.0
+  # Conservative joint software limits (degrees)
+  joint_limits_deg:
+    shoulder_pan: [-110.0, 110.0]
+    shoulder_lift: [-95.0, 95.0]
+    elbow_flex: [-100.0, 100.0]
+    wrist_flex: [-100.0, 100.0]
+    wrist_roll: [-150.0, 150.0]
+    gripper: [0.0, 100.0]
+
+kinematics:
+  # Effective link lengths (meters) for the pure-NumPy SO-101 fallback solver
+  # Measure/tune against your physical SO-101 build if not using placo + URDF
+  base_height_m: 0.115
+  shoulder_offset_x_m: 0.030
+  upper_arm_m: 0.116
+  forearm_m: 0.135
+  wrist_to_tip_m: 0.095
+  workspace_radius_min_m: 0.12
+  workspace_radius_max_m: 0.32
+  min_z_m: 0.008
+
+workspace:
+  # Height targets in SO-101 base frame (meters, z=0 is tabletop mat surface)
+  pre_grasp_offset_m: 0.065
+  item_pick_z_m:
+    sugar_cube: 0.012
+    marshmallow: 0.018
+  cup_rim_z_m: 0.110
+  transit_z_m: 0.170          # Must clear the tallest mug + gripped item
+  cup_drop_z_m: 0.135         # Drop just above rim center
+
+  # Item-specific gripper targets (0 = closed, 100 = fully open)
+  gripper_profiles:
+    open_pct: 75.0
+    sugar_cube:
+      close_pct: 22.0
+    marshmallow:
+      close_pct: 36.0         # Wider stop so marshmallow isn't crushed
+
+cameras:
+  overhead:
+    device: "${CAM_OVERHEAD_DEVICE:-/dev/video0}"
+    width: 1280
+    height: 720
+    fps: 30
+    fourcc: "MJPG"
+    warmup_frames: 5
+  wrist:
+    device: "${CAM_WRIST_DEVICE:-/dev/video2}"
+    width: 640
+    height: 480
+    fps: 30
+    fourcc: "MJPG"
+    warmup_frames: 3
+
+aruco:
+  dictionary: "DICT_4X4_50"
+  # Measured (x, y) in meters in SO-101 base frame (+x forward, +y left)
+  # Measure your taped mat corners before running scripts/calibrate_mat.py
+  corner_markers:
+    0: [0.14,  0.14]   # Near-left
+    1: [0.14, -0.14]   # Near-right
+    2: [0.32, -0.14]   # Far-right
+    3: [0.32,  0.14]   # Far-left
+  camera_position_m: [0.23, 0.0, 0.65]   # Approximate overhead camera [X, Y, Z] for parallax
+
+brain:
+  model: "gemini-4-hydrogen"
+  thinking_level: "low"
+  max_retries: 1
+
+voice:
+  gemma_api_url: "${GEMMA_API_URL:-http://gemma-llm:8000/v1/chat/completions}"
+  gemma_model: "${GEMMA_MODEL:-gemma-4-e2b}"
+  tts_api_url: "${TTS_API_URL:-http://local-tts:8000/v1/audio/speech}"
+  mute_padding_s: 0.5
