@@ -10,13 +10,21 @@ from src.hardware.arm import SafeSO101Arm
 from src.hardware.feetech_bus import ArmCalibration, JointCalibration, joints_to_ticks
 from scripts.calibrate_mat import parse_jog_command
 from scripts.check_joints import audit_joint_calibration
+from src.brain.gemini_hydrogen import PickDropAction, norm_yx_to_pixel
+from src.hardware.arm import SafeSO101Arm
+from src.hardware.feetech_bus import ArmCalibration, JointCalibration, joints_to_ticks
 from src.skills.calibration import (
     MatCalibration,
     align_corner_markers_from_measured,
+    estimate_box_dimensions_m,
     pick_point_to_base_xyz,
     solve_homography_from_points,
 )
-from src.skills.ik_controller import SO101Kinematics, build_cup_safe_waypoints
+from src.skills.ik_controller import (
+    SO101Kinematics,
+    build_cup_safe_waypoints,
+    compute_close_pct_for_width,
+)
 from src.voice.gatekeeper import parse_gatekeeper_json
 
 
@@ -331,3 +339,63 @@ def test_cup_safe_waypoints_allows_far_pick_retract() -> None:
     labels = [w.label for w in wps]
     assert "LIFT_VERTICAL" in labels
     assert labels[-1] == "RETURN_HOME"
+
+
+def test_pick_box_width_estimation_and_adaptive_close_pct() -> None:
+    action = PickDropAction(
+        item_type="rigid_object",
+        pick_point=[500, 500],
+        pick_box=[480, 490, 520, 510],
+        cup_point=[300, 700],
+    )
+    assert action.pick_box == [480, 490, 520, 510]
+
+    with pytest.raises(ValueError):
+        PickDropAction(
+            item_type="marshmallow",
+            pick_point=[500, 500],
+            pick_box=[600, 490, 520, 510],
+            cup_point=[300, 700],
+        )
+
+    # 1000x1000 image scaled 0.001 m/px -> x span is 20px = 0.020m, y span is 40px = 0.040m
+    cal = MatCalibration(
+        homography=np.diag([0.001, 0.001, 1.0]),
+        camera_position_m=(0.50, 0.50, 1.00),
+        image_width=1000,
+        image_height=1000,
+        reprojection_error_m=0.0,
+    )
+    width_m, length_m = estimate_box_dimensions_m(cal, action.pick_box, z_visual_m=0.0)
+    assert width_m == pytest.approx(0.020)
+    assert length_m == pytest.approx(0.040)
+
+    profiles = {
+        "open_pct": 75.0,
+        "max_jaw_width_m": 0.055,
+        "min_jaw_width_m": 0.0,
+        "squeeze_margin_m": 0.006,
+        "marshmallow": {"close_pct": 0.0, "squeeze_margin_m": 0.016},
+        "rigid_object": {"close_pct": 18.0},
+    }
+    assert compute_close_pct_for_width(0.015, profiles, "marshmallow") == pytest.approx(0.0)
+    assert compute_close_pct_for_width(0.032, profiles, "marshmallow") == pytest.approx(29.1)
+    assert compute_close_pct_for_width(0.025, profiles, "rigid_object") == pytest.approx(34.5)
+
+    wps = build_cup_safe_waypoints(
+        SO101Kinematics(_sample_kin_cfg()),
+        (0.18, 0.06, 0.012),
+        (0.22, -0.06, 0.110),
+        "rigid_object",
+        _sample_workspace_cfg(),
+        {
+            "shoulder_pan": 0.0,
+            "shoulder_lift": -35.0,
+            "elbow_flex": 75.0,
+            "wrist_flex": 40.0,
+            "wrist_roll": 0.0,
+            "gripper": 70.0,
+        },
+        close_pct_override=34.5,
+    )
+    assert wps[2].joints_deg["gripper"] == pytest.approx(34.5)

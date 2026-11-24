@@ -9,12 +9,17 @@ from pathlib import Path
 
 import cv2
 
-from src.brain.gemini_hydrogen import GeminiHydrogenBrain, norm_yx_to_pixel
+from src.brain.gemini_hydrogen import GeminiHydrogenBrain, norm_box_to_pixels, norm_yx_to_pixel
 from src.config import load_hardware_config
 from src.hardware.arm import SafeSO101Arm
 from src.hardware.cameras import DualCameraRig
-from src.skills.calibration import MatCalibration, detect_aruco_centers, pick_point_to_base_xyz
-from src.skills.ik_controller import SO101Kinematics
+from src.skills.calibration import (
+    MatCalibration,
+    detect_aruco_centers,
+    estimate_item_box_m,
+    pick_point_to_base_xyz,
+)
+from src.skills.ik_controller import SO101Kinematics, compute_close_pct_for_width
 
 
 def main() -> None:
@@ -72,21 +77,33 @@ def main() -> None:
         for idx, act in enumerate(plan.actions, start=1):
             u_p, v_p = norm_yx_to_pixel(act.pick_point, w, h)
             u_c, v_c = norm_yx_to_pixel(act.cup_point, w, h)
-            cv2.circle(annotated, (int(u_p), int(v_p)), 10, (0, 255, 0), 2)
-            cv2.putText(annotated, f"{idx}:{act.item_type}", (int(u_p) + 12, int(v_p)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            u0, v0, u1, v1 = norm_box_to_pixels(act.pick_box, w, h)
+            cv2.rectangle(annotated, (int(u0), int(v0)), (int(u1), int(v1)), (0, 255, 0), 2)
+            cv2.circle(annotated, (int(u_p), int(v_p)), 6, (0, 255, 0), -1)
             cv2.circle(annotated, (int(u_c), int(v_c)), 12, (255, 165, 0), 2)
             cv2.putText(annotated, f"{idx}:cup", (int(u_c) + 12, int(v_c)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 2)
 
+            label = f"{idx}:{act.item_type}"
             if cal is not None:
                 gpx, gpy, _ = cal.pixel_to_base_xyz(u_p, v_p, z_target_m=0.0)
                 gcx, gcy, _ = cal.pixel_to_base_xyz(u_c, v_c, z_target_m=0.0)
                 px, py, pz = pick_point_to_base_xyz(cal, cfg["workspace"], act.item_type, u_p, v_p)
                 cx, cy, cz = cal.pixel_to_base_xyz(u_c, v_c, z_target_m=float(cfg["workspace"]["cup_rim_z_m"]))
+                width_m, length_m = estimate_item_box_m(cal, cfg["workspace"], act.item_type, act.pick_box)
+                profiles = cfg["workspace"]["gripper_profiles"]
+                close_pct = (
+                    compute_close_pct_for_width(width_m, profiles, act.item_type)
+                    if profiles.get("use_width_estimate", False)
+                    else float(profiles[act.item_type]["close_pct"])
+                )
+                label = f"{idx}:{act.item_type} ({width_m * 1000:.0f}mm)"
                 print(
                     f"  [{idx}] {act.item_type}: "
-                    f"pick_px=({u_p:.0f},{v_p:.0f}) gnd=({gpx:.3f},{gpy:.3f}) -> ({px:.3f}, {py:.3f}, {pz:.3f})m | "
+                    f"pick_px=({u_p:.0f},{v_p:.0f}) gnd=({gpx:.3f},{gpy:.3f}) -> ({px:.3f}, {py:.3f}, {pz:.3f})m "
+                    f"size={width_m * 1000:.0f}x{length_m * 1000:.0f}mm grip={close_pct:.1f}% | "
                     f"cup_px=({u_c:.0f},{v_c:.0f}) gnd=({gcx:.3f},{gcy:.3f}) -> ({cx:.3f}, {cy:.3f}, {cz:.3f})m"
                 )
+            cv2.putText(annotated, label, (int(u0), max(18, int(v0) - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
 
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)

@@ -72,10 +72,15 @@ workspace:
   # Item-specific gripper targets (0 = closed, 100 = fully open)
   gripper_profiles:
     open_pct: 75.0
+    max_jaw_width_m: 0.055    # Measured jaw opening at 100% open (~5.5cm)
+    min_jaw_width_m: 0.000    # Jaw gap at 0% closed
+    squeeze_margin_m: 0.006   # Default squeeze margin for compliant TPU jaws
+    use_width_estimate: true  # Estimate width from Gemini pick_box to adapt close_pct
     sugar_cube:
       close_pct: 22.0
     marshmallow:
-      close_pct: 0.0          # Full close for compliant TPU grippers around mini marshmallow
+      close_pct: 0.0          # Fallback when width estimate disabled
+      squeeze_margin_m: 0.016 # Mini marshmallows (~15mm) close to 0%; jumbo (~30mm) closes ~25%
     rigid_object:
       close_pct: 18.0         # Firm grasp for small rigid test objects (e.g. Lego)
 

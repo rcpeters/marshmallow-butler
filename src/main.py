@@ -9,12 +9,16 @@ from typing import Any
 
 import cv2
 
-from src.brain.gemini_hydrogen import GeminiHydrogenBrain, PlanResponse, norm_yx_to_pixel
+from src.brain.gemini_hydrogen import GeminiHydrogenBrain, PlanResponse, norm_box_to_pixels, norm_yx_to_pixel
 from src.config import load_hardware_config
 from src.hardware.arm import SafeSO101Arm
 from src.hardware.cameras import DualCameraRig
-from src.skills.calibration import MatCalibration, pick_point_to_base_xyz
-from src.skills.ik_controller import SO101Kinematics, build_cup_safe_waypoints
+from src.skills.calibration import MatCalibration, estimate_item_box_m, pick_point_to_base_xyz
+from src.skills.ik_controller import (
+    SO101Kinematics,
+    build_cup_safe_waypoints,
+    compute_close_pct_for_width,
+)
 from src.voice.gatekeeper import VoiceGatekeeper
 
 logger = logging.getLogger(__name__)
@@ -66,15 +70,43 @@ class DrinkAssistantOrchestrator:
             g_cup = self.calibration.pixel_to_base_xyz(u_cup, v_cup, z_target_m=0.0)
             pick_xyz = pick_point_to_base_xyz(self.calibration, ws, action.item_type, u_pick, v_pick)
             cup_xyz = self.calibration.pixel_to_base_xyz(u_cup, v_cup, z_target_m=cup_rim_z)
+            width_m, length_m = estimate_item_box_m(self.calibration, ws, action.item_type, action.pick_box)
+
+            profiles = ws["gripper_profiles"]
+            if profiles.get("use_width_estimate", False):
+                close_pct = compute_close_pct_for_width(width_m, profiles, action.item_type)
+            else:
+                close_pct = float(profiles[action.item_type]["close_pct"])
+
+            max_jaw_m = float(profiles.get("max_jaw_width_m", 0.055))
+            if width_m > max_jaw_m:
+                logger.warning(
+                    "Estimated %s width %.1fmm exceeds max_jaw_width_m %.1fmm!",
+                    action.item_type,
+                    width_m * 1000.0,
+                    max_jaw_m * 1000.0,
+                )
 
             if annotated is not None:
-                cv2.circle(annotated, (int(u_pick), int(v_pick)), 10, (0, 255, 0), 2)
-                cv2.putText(annotated, f"{idx}:{action.item_type}", (int(u_pick) + 12, int(v_pick)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                u0, v0, u1, v1 = norm_box_to_pixels(
+                    action.pick_box, self.calibration.image_width, self.calibration.image_height
+                )
+                cv2.rectangle(annotated, (int(u0), int(v0)), (int(u1), int(v1)), (0, 255, 0), 2)
+                cv2.circle(annotated, (int(u_pick), int(v_pick)), 6, (0, 255, 0), -1)
+                cv2.putText(
+                    annotated,
+                    f"{idx}:{action.item_type} ({width_m * 1000:.0f}mm)",
+                    (int(u0), max(18, int(v0) - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (0, 255, 0),
+                    2,
+                )
                 cv2.circle(annotated, (int(u_cup), int(v_cup)), 12, (255, 165, 0), 2)
                 cv2.putText(annotated, f"{idx}:cup", (int(u_cup) + 12, int(v_cup)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 2)
 
             logger.info(
-                "Action %d/%d (%s): pick_px=(%.0f,%.0f) gnd=(%.3f,%.3f) xyz=%s | "
+                "Action %d/%d (%s): pick_px=(%.0f,%.0f) gnd=(%.3f,%.3f) xyz=%s size=%.0fx%.0fmm grip=%.1f%% | "
                 "cup_px=(%.0f,%.0f) gnd=(%.3f,%.3f) xyz=%s",
                 idx,
                 len(plan.actions),
@@ -84,6 +116,9 @@ class DrinkAssistantOrchestrator:
                 g_pick[0],
                 g_pick[1],
                 tuple(round(v, 3) for v in pick_xyz),
+                width_m * 1000.0,
+                length_m * 1000.0,
+                close_pct,
                 u_cup,
                 v_cup,
                 g_cup[0],
@@ -102,6 +137,7 @@ class DrinkAssistantOrchestrator:
                 item_type=action.item_type,
                 workspace_cfg=ws,
                 home_pose_deg=self.arm.home_pose_deg,
+                close_pct_override=close_pct,
             )
             self.arm.execute_waypoints(waypoints)
 

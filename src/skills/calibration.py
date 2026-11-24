@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Iterable
 
@@ -83,6 +84,42 @@ def pick_point_to_base_xyz(
     z_visual = float(workspace_cfg.get("item_point_z_m", {}).get(item_type, z_pick))
     px, py, _ = calibration.pixel_to_base_xyz(u, v, z_target_m=z_visual)
     return px, py, z_pick
+
+
+def estimate_box_dimensions_m(
+    calibration: MatCalibration,
+    box_yx: list[int],
+    z_visual_m: float = 0.0,
+) -> tuple[float, float]:
+    """Estimate physical (width_m, length_m) of a normalized [ymin, xmin, ymax, xmax] box."""
+    ymin, xmin, ymax, xmax = box_yx
+    u0 = (xmin / 1000.0) * calibration.image_width
+    u1 = (xmax / 1000.0) * calibration.image_width
+    v0 = (ymin / 1000.0) * calibration.image_height
+    v1 = (ymax / 1000.0) * calibration.image_height
+    u_mid = 0.5 * (u0 + u1)
+    v_mid = 0.5 * (v0 + v1)
+
+    lx, ly, _ = calibration.pixel_to_base_xyz(u0, v_mid, z_target_m=z_visual_m)
+    rx, ry, _ = calibration.pixel_to_base_xyz(u1, v_mid, z_target_m=z_visual_m)
+    tx, ty, _ = calibration.pixel_to_base_xyz(u_mid, v0, z_target_m=z_visual_m)
+    bx, by, _ = calibration.pixel_to_base_xyz(u_mid, v1, z_target_m=z_visual_m)
+
+    span_a = math.hypot(rx - lx, ry - ly)
+    span_b = math.hypot(bx - tx, by - ty)
+    return (min(span_a, span_b), max(span_a, span_b))
+
+
+def estimate_item_box_m(
+    calibration: MatCalibration,
+    workspace_cfg: dict,
+    item_type: str,
+    box_yx: list[int],
+) -> tuple[float, float]:
+    """Estimate item (width_m, length_m) using its configured visual parallax height."""
+    z_pick = float(workspace_cfg["item_pick_z_m"][item_type])
+    z_visual = float(workspace_cfg.get("item_point_z_m", {}).get(item_type, z_pick))
+    return estimate_box_dimensions_m(calibration, box_yx, z_visual_m=z_visual)
 
 
 def _get_aruco_detector(dict_name: str) -> cv2.aruco.ArucoDetector:

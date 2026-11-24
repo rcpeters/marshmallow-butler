@@ -137,6 +137,26 @@ class SO101Kinematics:
         return (r * math.cos(pan_rad), r * math.sin(pan_rad), z)
 
 
+def compute_close_pct_for_width(
+    width_m: float,
+    gripper_profiles: dict[str, Any],
+    item_type: str,
+) -> float:
+    """Convert estimated object width (m) into target gripper close_pct (0..open_pct)."""
+    max_jaw_width = float(gripper_profiles.get("max_jaw_width_m", 0.055))
+    min_jaw_width = float(gripper_profiles.get("min_jaw_width_m", 0.0))
+    open_pct = float(gripper_profiles["open_pct"])
+    profile = gripper_profiles.get(item_type, {})
+    default_close = float(profile.get("close_pct", 0.0))
+    if max_jaw_width <= min_jaw_width:
+        return default_close
+
+    squeeze = float(profile.get("squeeze_margin_m", gripper_profiles.get("squeeze_margin_m", 0.006)))
+    target_gap = max(min_jaw_width, float(width_m) - squeeze)
+    pct = ((target_gap - min_jaw_width) / (max_jaw_width - min_jaw_width)) * 100.0
+    return max(0.0, min(open_pct - 5.0, round(pct, 1)))
+
+
 def build_cup_safe_waypoints(
     ik: SO101Kinematics,
     pick_xyz: tuple[float, float, float],
@@ -144,6 +164,7 @@ def build_cup_safe_waypoints(
     item_type: Literal["sugar_cube", "marshmallow", "rigid_object"],
     workspace_cfg: dict[str, Any],
     home_pose_deg: dict[str, float],
+    close_pct_override: float | None = None,
 ) -> list[Waypoint]:
     """Build a collision-safe pick-and-drop sequence that clears the cup rim."""
     px, py, pz = pick_xyz
@@ -160,7 +181,7 @@ def build_cup_safe_waypoints(
 
     profiles = workspace_cfg["gripper_profiles"]
     open_pct = float(profiles["open_pct"])
-    close_pct = float(profiles[item_type]["close_pct"])
+    close_pct = float(profiles[item_type]["close_pct"]) if close_pct_override is None else float(close_pct_override)
 
     pre_grasp = ik.solve_topdown_ik(px, py, pz + pre_offset, gripper_pct=open_pct)
     descend = ik.solve_topdown_ik(px, py, pz, gripper_pct=open_pct)

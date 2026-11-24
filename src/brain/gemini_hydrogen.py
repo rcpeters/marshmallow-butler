@@ -23,6 +23,11 @@ class PickDropAction(BaseModel):
         max_length=2,
         description="Normalized [y, x] (0-1000) center of the target item on the mat.",
     )
+    pick_box: list[int] = Field(
+        min_length=4,
+        max_length=4,
+        description="Normalized [ymin, xmin, ymax, xmax] (0-1000) tight bounding box around the target item.",
+    )
     cup_point: list[int] = Field(
         min_length=2,
         max_length=2,
@@ -36,6 +41,14 @@ class PickDropAction(BaseModel):
         if not (0 <= y <= 1000 and 0 <= x <= 1000):
             raise ValueError(f"Point {pts} must be in normalized [0, 1000] range.")
         return pts
+
+    @field_validator("pick_box")
+    @classmethod
+    def _validate_normalized_box(cls, box: list[int]) -> list[int]:
+        ymin, xmin, ymax, xmax = box
+        if not (0 <= ymin <= ymax <= 1000 and 0 <= xmin <= xmax <= 1000):
+            raise ValueError(f"Box {box} must satisfy 0 <= ymin <= ymax <= 1000 and 0 <= xmin <= xmax <= 1000.")
+        return box
 
 
 class PlanResponse(BaseModel):
@@ -73,6 +86,7 @@ Given an overhead camera image of the workspace and a user's request:
 3. If anything required is missing or the request is unsafe/impossible, set feasible=false, actions=[], and write a helpful short spoken_reply explaining what is missing.
 4. Otherwise set feasible=true and output one action per requested item using normalized [y, x] coordinates on a 0..1000 scale (top-left is [0, 0], bottom-right is [1000, 1000]):
    - pick_point: exact center of the item to grasp.
+   - pick_box: tight [ymin, xmin, ymax, xmax] bounding box enclosing only the target item.
    - cup_point: center of the open top rim of the target cup.
 Keep spoken_reply concise and friendly (1 short sentence)."""
 
@@ -88,6 +102,17 @@ def norm_yx_to_pixel(point_yx: list[int], width: int, height: int) -> tuple[floa
     u = (x_norm / 1000.0) * width
     v = (y_norm / 1000.0) * height
     return u, v
+
+
+def norm_box_to_pixels(box_yx: list[int], width: int, height: int) -> tuple[float, float, float, float]:
+    """Convert normalized Gemini [ymin, xmin, ymax, xmax] (0..1000) to (u_min, v_min, u_max, v_max)."""
+    ymin, xmin, ymax, xmax = box_yx
+    return (
+        (xmin / 1000.0) * width,
+        (ymin / 1000.0) * height,
+        (xmax / 1000.0) * width,
+        (ymax / 1000.0) * height,
+    )
 
 
 class GeminiHydrogenBrain:
