@@ -1,4 +1,5 @@
-lerobot[feetech]>=0.4.0
+feetech-servo-sdk>=1.0.0
+pyserial>=3.5
 google-genai>=1.0.0
 opencv-contrib-python-headless>=4.10.0
 numpy>=1.26.0

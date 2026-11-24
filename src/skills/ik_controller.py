@@ -44,6 +44,7 @@ class SO101Kinematics:
         self.r_min = float(kin_cfg["workspace_radius_min_m"])
         self.r_max = float(kin_cfg["workspace_radius_max_m"])
         self.min_z = float(kin_cfg["min_z_m"])
+        self.dogleg_rad = math.radians(float(kin_cfg.get("upper_arm_dogleg_deg", 0.0)))
 
         signs = kin_cfg.get("joint_signs", {})
         offsets = kin_cfg.get("joint_offsets_deg", {})
@@ -93,11 +94,12 @@ class SO101Kinematics:
         theta1 = alpha + beta  # Upper arm elevation above +r horizontal
         theta2 = theta1 - elbow_rad  # Forearm elevation above +r horizontal
 
-        # Raw physical angles relative to upright shoulder & top-down (-pi/2) gripper
+        # Raw physical angles relative to upright shoulder & top-down (-pi/2) gripper.
+        # Account for the SO-101 upper arm's built-in forward dog-leg bend when calibrated upright.
         raw_deg = {
             "shoulder_pan": math.degrees(pan_rad),
-            "shoulder_lift": math.degrees((math.pi / 2.0) - theta1),
-            "elbow_flex": math.degrees(elbow_rad),
+            "shoulder_lift": math.degrees((math.pi / 2.0) - theta1 - self.dogleg_rad),
+            "elbow_flex": math.degrees(elbow_rad + self.dogleg_rad),
             "wrist_flex": math.degrees(theta2 + (math.pi / 2.0)),
             "wrist_roll": wrist_roll_deg,
             "gripper": float(gripper_pct),
@@ -108,12 +110,38 @@ class SO101Kinematics:
             for j in ARM_JOINTS
         }
 
+    def solve_fk(self, joints_deg: dict[str, float]) -> tuple[float, float, float]:
+        """Compute gripper-tip (x, y, z) meters in the SO-101 base frame from joint angles."""
+        raw_deg = {
+            j: (float(joints_deg[j]) - self.offsets[j]) / self.signs[j]
+            for j in ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex")
+        }
+        pan_rad = math.radians(raw_deg["shoulder_pan"])
+        theta1 = (math.pi / 2.0) - math.radians(raw_deg["shoulder_lift"]) - self.dogleg_rad
+        elbow_rad = math.radians(raw_deg["elbow_flex"]) - self.dogleg_rad
+        theta2 = theta1 - elbow_rad
+        theta3 = theta2 - math.radians(raw_deg["wrist_flex"])
+
+        r = (
+            self.shoulder_offset_x_m
+            + self.upper_arm_m * math.cos(theta1)
+            + self.forearm_m * math.cos(theta2)
+            + self.wrist_to_tip_m * math.cos(theta3)
+        )
+        z = (
+            self.base_height_m
+            + self.upper_arm_m * math.sin(theta1)
+            + self.forearm_m * math.sin(theta2)
+            + self.wrist_to_tip_m * math.sin(theta3)
+        )
+        return (r * math.cos(pan_rad), r * math.sin(pan_rad), z)
+
 
 def build_cup_safe_waypoints(
     ik: SO101Kinematics,
     pick_xyz: tuple[float, float, float],
     cup_xyz: tuple[float, float, float],
-    item_type: Literal["sugar_cube", "marshmallow"],
+    item_type: Literal["sugar_cube", "marshmallow", "rigid_object"],
     workspace_cfg: dict[str, Any],
     home_pose_deg: dict[str, float],
 ) -> list[Waypoint]:
@@ -137,7 +165,30 @@ def build_cup_safe_waypoints(
     pre_grasp = ik.solve_topdown_ik(px, py, pz + pre_offset, gripper_pct=open_pct)
     descend = ik.solve_topdown_ik(px, py, pz, gripper_pct=open_pct)
     grasp = ik.solve_topdown_ik(px, py, pz, gripper_pct=close_pct)
-    lift_pick = ik.solve_topdown_ik(px, py, transit_z, gripper_pct=close_pct)
+
+    lift_waypoints: list[Waypoint] = []
+    try:
+        lift_pick = ik.solve_topdown_ik(px, py, transit_z, gripper_pct=close_pct)
+    except ValueError:
+        dz_t = transit_z + ik.wrist_to_tip_m - ik.base_height_m
+        span = ik.upper_arm_m + ik.forearm_m - 0.002
+        pick_r = math.hypot(px, py)
+        if abs(dz_t) >= span or pick_r <= 1e-6:
+            raise
+        r_transit_max = min(ik.r_max, ik.shoulder_offset_x_m + math.sqrt(span * span - dz_t * dz_t) - 0.003)
+        if r_transit_max < ik.r_min or r_transit_max >= pick_r:
+            raise
+        lift_waypoints.append(
+            Waypoint(
+                "LIFT_VERTICAL",
+                ik.solve_topdown_ik(px, py, pz + pre_offset, gripper_pct=close_pct),
+                duration_s=0.8,
+            )
+        )
+        scale = r_transit_max / pick_r
+        lift_pick = ik.solve_topdown_ik(px * scale, py * scale, transit_z, gripper_pct=close_pct)
+    lift_waypoints.append(Waypoint("LIFT_CLEAR", lift_pick, duration_s=1.0))
+
     transit_cup = ik.solve_topdown_ik(cx, cy, transit_z, gripper_pct=close_pct)
     descend_drop = ik.solve_topdown_ik(cx, cy, cup_drop_z, gripper_pct=close_pct)
     release = ik.solve_topdown_ik(cx, cy, cup_drop_z, gripper_pct=open_pct)
@@ -147,10 +198,10 @@ def build_cup_safe_waypoints(
         Waypoint("PRE_GRASP", pre_grasp),
         Waypoint("DESCEND_TO_ITEM", descend, duration_s=0.9),
         Waypoint(f"GRASP_{item_type.upper()}", grasp, duration_s=0.6),
-        Waypoint("LIFT_CLEAR", lift_pick, duration_s=1.0),
+        *lift_waypoints,
         Waypoint("TRANSIT_OVER_CUP", transit_cup),
         Waypoint("DESCEND_TO_CUP_DROP", descend_drop, duration_s=0.8),
         Waypoint("RELEASE_IN_CUP", release, duration_s=0.6),
         Waypoint("RETRACT_ABOVE_CUP", retract_cup, duration_s=0.8),
-        Waypoint("RETURN_HOME", dict(home_pose_deg)),
+        Waypoint("RETURN_HOME", dict(home_pose_deg), duration_s=1.8),
     ]

@@ -1,0 +1,17 @@
+# Secrets & local env
+.env
+
+# Python / caches
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.pytest_cache/
+
+# Persistent runtime caches & downloaded assets
+.cache/
+assets/
+data/
+*.png
+*.jpg
+!docs/*.png

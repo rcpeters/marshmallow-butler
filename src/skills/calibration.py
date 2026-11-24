@@ -71,11 +71,163 @@ class MatCalibration:
         )
 
 
+def pick_point_to_base_xyz(
+    calibration: MatCalibration,
+    workspace_cfg: dict,
+    item_type: str,
+    u: float,
+    v: float,
+) -> tuple[float, float, float]:
+    """Project pick pixel using visual surface height for parallax, returning grasp tip z."""
+    z_pick = float(workspace_cfg["item_pick_z_m"][item_type])
+    z_visual = float(workspace_cfg.get("item_point_z_m", {}).get(item_type, z_pick))
+    px, py, _ = calibration.pixel_to_base_xyz(u, v, z_target_m=z_visual)
+    return px, py, z_pick
+
+
 def _get_aruco_detector(dict_name: str) -> cv2.aruco.ArucoDetector:
     aruco_dict_id = getattr(cv2.aruco, dict_name)
     dictionary = cv2.aruco.getPredefinedDictionary(aruco_dict_id)
     params = cv2.aruco.DetectorParameters()
     return cv2.aruco.ArucoDetector(dictionary, params)
+
+
+def detect_aruco_centers(
+    frame_bgr: np.ndarray,
+    dict_name: str = "DICT_4X4_50",
+) -> dict[int, tuple[float, float]]:
+    """Detect all ArUco markers in frame_bgr and return {id: (u, v)} pixel centers."""
+    detector = _get_aruco_detector(dict_name)
+    corners, ids, _ = detector.detectMarkers(frame_bgr)
+    if ids is None:
+        return {}
+    centers: dict[int, tuple[float, float]] = {}
+    for marker_corners, marker_id in zip(corners, ids.flatten()):
+        uv = marker_corners[0].mean(axis=0)
+        centers[int(marker_id)] = (float(uv[0]), float(uv[1]))
+    return centers
+
+
+def _check_convex_quad(
+    detected_centers: dict[int, tuple[float, float] | np.ndarray],
+    corner_markers_m: dict[int, Iterable[float]],
+) -> None:
+    """Reject swapped corner marker IDs that form a self-intersecting bowtie quad."""
+    if len(corner_markers_m) != 4:
+        return
+    ids = [int(k) for k in corner_markers_m.keys()]
+    world = np.array([list(corner_markers_m[mid])[:2] for mid in ids], dtype=np.float64)
+    center = world.mean(axis=0)
+    angles = np.arctan2(world[:, 1] - center[1], world[:, 0] - center[0])
+    order = np.argsort(angles)
+    pts = np.array([detected_centers[ids[i]] for i in order], dtype=np.float64)
+
+    cross_signs: list[float] = []
+    for i in range(4):
+        v1 = pts[(i + 1) % 4] - pts[i]
+        v2 = pts[(i + 2) % 4] - pts[(i + 1) % 4]
+        cross = float(v1[0] * v2[1] - v1[1] * v2[0])
+        if abs(cross) < 1e-6:
+            raise RuntimeError("Detected ArUco markers are nearly collinear; check marker placement.")
+        cross_signs.append(1.0 if cross > 0.0 else -1.0)
+
+    if len(set(cross_signs)) != 1:
+        px_summary = {mid: (round(float(detected_centers[mid][0])), round(float(detected_centers[mid][1]))) for mid in ids}
+        raise RuntimeError(
+            "ArUco markers form a self-intersecting (bowtie) quad in the image — "
+            "two corner_markers IDs are swapped relative to your physical mat "
+            f"(world order: {[ids[i] for i in order]}, pixels: {px_summary})."
+        )
+
+
+def solve_homography_from_points(
+    detected_centers: dict[int, tuple[float, float] | np.ndarray],
+    corner_markers_m: dict[int, Iterable[float]],
+    camera_position_m: tuple[float, float, float],
+    image_width: int,
+    image_height: int,
+) -> MatCalibration:
+    """Solve pixel -> tabletop homography from detected marker pixels and base (x, y) coords."""
+    expected_ids = [int(k) for k in corner_markers_m.keys()]
+    missing = [mid for mid in expected_ids if mid not in detected_centers]
+    if missing:
+        raise RuntimeError(f"Missing expected ArUco marker IDs: {missing}. Found: {sorted(detected_centers)}")
+
+    _check_convex_quad(detected_centers, corner_markers_m)
+
+    src_pixels = np.array([detected_centers[mid] for mid in expected_ids], dtype=np.float64)
+    dst_world = np.array([list(corner_markers_m[mid])[:2] for mid in expected_ids], dtype=np.float64)
+
+    homography, _ = cv2.findHomography(src_pixels, dst_world, method=0)
+    if homography is None:
+        raise RuntimeError("cv2.findHomography failed to solve planar transform.")
+
+    ones = np.ones((src_pixels.shape[0], 1), dtype=np.float64)
+    pts_h = np.hstack([src_pixels, ones]) @ homography.T
+    pred_xy = pts_h[:, :2] / pts_h[:, 2:3]
+    mean_err = float(np.mean(np.linalg.norm(pred_xy - dst_world, axis=1)))
+
+    return MatCalibration(
+        homography=homography,
+        camera_position_m=tuple(float(v) for v in camera_position_m),
+        image_width=int(image_width),
+        image_height=int(image_height),
+        reprojection_error_m=mean_err,
+    )
+
+
+def align_corner_markers_from_measured(
+    configured_markers_m: dict[int, Iterable[float]],
+    measured_markers_m: dict[int, Iterable[float]],
+) -> dict[int, list[float]]:
+    """Update mat corner coordinates from 1, 2+, or all 4 arm-measured marker centers.
+
+    - If all configured markers were measured directly, returns those measured coordinates.
+    - If 1 marker was measured, translates all configured markers by (measured - configured).
+    - If 2+ markers (subset) were measured, fits a rigid 2D transform (rotation + translation)
+      via Kabsch/SVD and transforms the full mat geometry into the arm's frame.
+    """
+    if not measured_markers_m:
+        raise ValueError("Need at least 1 arm-measured marker coordinate to align the mat.")
+
+    cfg_xy = {int(k): np.array(list(v)[:2], dtype=np.float64) for k, v in configured_markers_m.items()}
+    meas_xy = {int(k): np.array(list(v)[:2], dtype=np.float64) for k, v in measured_markers_m.items()}
+
+    if all(mid in meas_xy for mid in cfg_xy):
+        return {mid: [round(float(meas_xy[mid][0]), 4), round(float(meas_xy[mid][1]), 4)] for mid in cfg_xy}
+
+    shared_ids = [mid for mid in cfg_xy if mid in meas_xy]
+    if not shared_ids:
+        raise ValueError("Measured marker IDs do not match any IDs in aruco.corner_markers.")
+
+    src = np.array([cfg_xy[mid] for mid in shared_ids], dtype=np.float64)
+    dst = np.array([meas_xy[mid] for mid in shared_ids], dtype=np.float64)
+
+    if len(shared_ids) == 1:
+        rot = np.eye(2, dtype=np.float64)
+        src_mean = src[0]
+        dst_mean = dst[0]
+    else:
+        src_mean = src.mean(axis=0)
+        dst_mean = dst.mean(axis=0)
+        src_c = src - src_mean
+        dst_c = dst - dst_mean
+        if np.linalg.norm(src_c) < 1e-9 or np.linalg.norm(dst_c) < 1e-9:
+            rot = np.eye(2, dtype=np.float64)
+        else:
+            cov = src_c.T @ dst_c
+            u_mat, _, vt_mat = np.linalg.svd(cov)
+            det_sign = 1.0 if np.linalg.det(vt_mat.T @ u_mat.T) >= 0.0 else -1.0
+            rot = vt_mat.T @ np.diag([1.0, det_sign]) @ u_mat.T
+
+    aligned: dict[int, list[float]] = {}
+    for mid, pt in cfg_xy.items():
+        if mid in meas_xy:
+            out_pt = meas_xy[mid]
+        else:
+            out_pt = (rot @ (pt - src_mean)) + dst_mean
+        aligned[mid] = [round(float(out_pt[0]), 4), round(float(out_pt[1]), 4)]
+    return aligned
 
 
 def calibrate_from_aruco_frame(
@@ -85,38 +237,14 @@ def calibrate_from_aruco_frame(
     dict_name: str = "DICT_4X4_50",
 ) -> MatCalibration:
     """Detect the 4 corner ArUco markers and solve pixel -> tabletop homography."""
-    detector = _get_aruco_detector(dict_name)
-    corners, ids, _ = detector.detectMarkers(frame_bgr)
-    if ids is None:
+    detected_centers = detect_aruco_centers(frame_bgr, dict_name=dict_name)
+    if not detected_centers:
         raise RuntimeError("No ArUco markers detected in the overhead frame.")
-
-    detected_centers: dict[int, np.ndarray] = {}
-    for marker_corners, marker_id in zip(corners, ids.flatten()):
-        detected_centers[int(marker_id)] = marker_corners[0].mean(axis=0)
-
-    expected_ids = [int(k) for k in corner_markers_m.keys()]
-    missing = [mid for mid in expected_ids if mid not in detected_centers]
-    if missing:
-        raise RuntimeError(f"Missing expected ArUco marker IDs: {missing}. Found: {sorted(detected_centers)}")
-
-    src_pixels = np.array([detected_centers[mid] for mid in expected_ids], dtype=np.float64)
-    dst_world = np.array([list(corner_markers_m[mid])[:2] for mid in expected_ids], dtype=np.float64)
-
-    homography, _ = cv2.findHomography(src_pixels, dst_world, method=0)
-    if homography is None:
-        raise RuntimeError("cv2.findHomography failed to solve planar transform.")
-
-    # Compute mean Euclidean reprojection error in meters
-    ones = np.ones((src_pixels.shape[0], 1), dtype=np.float64)
-    pts_h = np.hstack([src_pixels, ones]) @ homography.T
-    pred_xy = pts_h[:, :2] / pts_h[:, 2:3]
-    mean_err = float(np.mean(np.linalg.norm(pred_xy - dst_world, axis=1)))
-
     height, width = frame_bgr.shape[:2]
-    return MatCalibration(
-        homography=homography,
-        camera_position_m=tuple(float(v) for v in camera_position_m),
+    return solve_homography_from_points(
+        detected_centers=detected_centers,
+        corner_markers_m=corner_markers_m,
+        camera_position_m=camera_position_m,
         image_width=width,
         image_height=height,
-        reprojection_error_m=mean_err,
     )

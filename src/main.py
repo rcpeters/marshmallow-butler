@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import argparse
 import logging
+from pathlib import Path
 from typing import Any
+
+import cv2
 
 from src.brain.gemini_hydrogen import GeminiHydrogenBrain, PlanResponse, norm_yx_to_pixel
 from src.config import load_hardware_config
 from src.hardware.arm import SafeSO101Arm
 from src.hardware.cameras import DualCameraRig
-from src.skills.calibration import MatCalibration
+from src.skills.calibration import MatCalibration, pick_point_to_base_xyz
 from src.skills.ik_controller import SO101Kinematics, build_cup_safe_waypoints
 from src.voice.gatekeeper import VoiceGatekeeper
 
@@ -46,10 +49,10 @@ class DrinkAssistantOrchestrator:
         if self.gatekeeper is not None:
             self.gatekeeper.speak(message)
 
-    def _execute_plan(self, plan: PlanResponse) -> None:
+    def _execute_plan(self, plan: PlanResponse, frame: Any = None) -> None:
         ws = self.cfg["workspace"]
-        pick_heights = ws["item_pick_z_m"]
         cup_rim_z = float(ws["cup_rim_z_m"])
+        annotated = frame.copy() if frame is not None else None
 
         for idx, action in enumerate(plan.actions, start=1):
             u_pick, v_pick = norm_yx_to_pixel(
@@ -59,18 +62,39 @@ class DrinkAssistantOrchestrator:
                 action.cup_point, self.calibration.image_width, self.calibration.image_height
             )
 
-            z_pick = float(pick_heights[action.item_type])
-            pick_xyz = self.calibration.pixel_to_base_xyz(u_pick, v_pick, z_target_m=z_pick)
+            g_pick = self.calibration.pixel_to_base_xyz(u_pick, v_pick, z_target_m=0.0)
+            g_cup = self.calibration.pixel_to_base_xyz(u_cup, v_cup, z_target_m=0.0)
+            pick_xyz = pick_point_to_base_xyz(self.calibration, ws, action.item_type, u_pick, v_pick)
             cup_xyz = self.calibration.pixel_to_base_xyz(u_cup, v_cup, z_target_m=cup_rim_z)
 
+            if annotated is not None:
+                cv2.circle(annotated, (int(u_pick), int(v_pick)), 10, (0, 255, 0), 2)
+                cv2.putText(annotated, f"{idx}:{action.item_type}", (int(u_pick) + 12, int(v_pick)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                cv2.circle(annotated, (int(u_cup), int(v_cup)), 12, (255, 165, 0), 2)
+                cv2.putText(annotated, f"{idx}:cup", (int(u_cup) + 12, int(v_cup)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 2)
+
             logger.info(
-                "Action %d/%d (%s): pick=%s -> cup=%s",
+                "Action %d/%d (%s): pick_px=(%.0f,%.0f) gnd=(%.3f,%.3f) xyz=%s | "
+                "cup_px=(%.0f,%.0f) gnd=(%.3f,%.3f) xyz=%s",
                 idx,
                 len(plan.actions),
                 action.item_type,
+                u_pick,
+                v_pick,
+                g_pick[0],
+                g_pick[1],
                 tuple(round(v, 3) for v in pick_xyz),
+                u_cup,
+                v_cup,
+                g_cup[0],
+                g_cup[1],
                 tuple(round(v, 3) for v in cup_xyz),
             )
+            if annotated is not None:
+                debug_path = Path("data/last_plan_debug.png")
+                debug_path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(debug_path), annotated)
+
             waypoints = build_cup_safe_waypoints(
                 ik=self.kinematics,
                 pick_xyz=pick_xyz,
@@ -95,9 +119,9 @@ class DrinkAssistantOrchestrator:
         for attempt in range(max_retries + 1):
             if self.gatekeeper is not None:
                 with self.gatekeeper.suppress_listening():
-                    self._execute_plan(plan)
+                    self._execute_plan(plan, frame=frame)
             else:
-                self._execute_plan(plan)
+                self._execute_plan(plan, frame=frame)
 
             if not self.verify_drops:
                 self._speak(plan.spoken_reply)

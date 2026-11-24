@@ -3,47 +3,71 @@
 arm:
   port: "${SO101_FOLLOWER_PORT:-/dev/so101_follower}"
   id: "${SO101_FOLLOWER_ID:-so101_follower_main}"
-  urdf_path: "assets/so101/so101_new_calib.urdf"
+  baudrate: 1000000
+  calibration_path: "config/arm_calibration.yaml"
+  motor_ids:
+    shoulder_pan: 1
+    shoulder_lift: 2
+    elbow_flex: 3
+    wrist_flex: 4
+    wrist_roll: 5
+    gripper: 6
   control_hz: 30
   move_duration_s: 1.4
-  # Neutral park pose in degrees (matches LeRobot SO101Follower joint keys)
+  # Folded rest pose in degrees (tucked back & left behind Marker 1 so camera view of cup is clear)
   home_pose_deg:
-    shoulder_pan: 0.0
-    shoulder_lift: -35.0
-    elbow_flex: 75.0
-    wrist_flex: 40.0
+    shoulder_pan: -40.0
+    shoulder_lift: -92.0
+    elbow_flex: 170.0
+    wrist_flex: 80.0
     wrist_roll: 0.0
-    gripper: 70.0
+    gripper: 20.0
   # Conservative joint software limits (degrees)
   joint_limits_deg:
     shoulder_pan: [-110.0, 110.0]
     shoulder_lift: [-95.0, 95.0]
-    elbow_flex: [-100.0, 100.0]
-    wrist_flex: [-100.0, 100.0]
+    elbow_flex: [-100.0, 178.0]
+    wrist_flex: [-100.0, 110.0]
     wrist_roll: [-150.0, 150.0]
     gripper: [0.0, 100.0]
 
 kinematics:
   # Effective link lengths (meters) for the pure-NumPy SO-101 fallback solver
-  # Measure/tune against your physical SO-101 build if not using placo + URDF
-  base_height_m: 0.115
-  shoulder_offset_x_m: 0.030
+  # Calibrated against physical SO-101 hand-hover measurements
+  base_height_m: 0.125
+  shoulder_offset_x_m: 0.045
   upper_arm_m: 0.116
   forearm_m: 0.135
-  wrist_to_tip_m: 0.095
+  wrist_to_tip_m: 0.170
+  upper_arm_dogleg_deg: 14.0  # Built-in SO-101 upper-arm forward offset (atan2(28mm, 112.6mm))
   workspace_radius_min_m: 0.12
   workspace_radius_max_m: 0.32
-  min_z_m: 0.008
+  min_z_m: -0.003
+  # Verified via scripts/check_joints.py --check-signs
+  joint_signs:
+    shoulder_pan: -1.0
+    shoulder_lift: 1.0
+    elbow_flex: 1.0
+    wrist_flex: 1.0
+    wrist_roll: -1.0
+    gripper: 1.0
+  # Trim neutral pan offset (-9.1 deg shifts ~+0.75cm toward +y left from -6.8)
+  joint_offsets_deg:
+    shoulder_pan: -9.1
 
 workspace:
   # Height targets in SO-101 base frame (meters, z=0 is tabletop mat surface)
   pre_grasp_offset_m: 0.065
   item_pick_z_m:
     sugar_cube: 0.012
-    marshmallow: 0.018
-  cup_rim_z_m: 0.110
-  transit_z_m: 0.170          # Must clear the tallest mug + gripped item
-  cup_drop_z_m: 0.135         # Drop just above rim center
+    marshmallow: 0.000        # Dropped 1cm for TPU jaw pinch zone around mini marshmallow
+    rigid_object: 0.012       # For testing with Legos, wooden blocks, etc.
+  # Visual point height on the item for camera parallax (falls back to item_pick_z_m if omitted)
+  item_point_z_m:
+    marshmallow: 0.012
+  cup_rim_z_m: 0.088
+  transit_z_m: 0.110          # Clears 8.8cm cup rim by 2.2cm within wrist_flex <= 109.5 deg
+  cup_drop_z_m: 0.102         # Drop 1.4cm above 8.8cm rim center
 
   # Item-specific gripper targets (0 = closed, 100 = fully open)
   gripper_profiles:
@@ -51,7 +75,9 @@ workspace:
     sugar_cube:
       close_pct: 22.0
     marshmallow:
-      close_pct: 36.0         # Wider stop so marshmallow isn't crushed
+      close_pct: 0.0          # Full close for compliant TPU grippers around mini marshmallow
+    rigid_object:
+      close_pct: 18.0         # Firm grasp for small rigid test objects (e.g. Lego)
 
 cameras:
   overhead:
@@ -74,11 +100,12 @@ aruco:
   # Measured (x, y) in meters in SO-101 base frame (+x forward, +y left)
   # Measure your taped mat corners before running scripts/calibrate_mat.py
   corner_markers:
-    0: [0.14,  0.14]   # Near-left
-    1: [0.14, -0.14]   # Near-right
-    2: [0.32, -0.14]   # Far-right
-    3: [0.32,  0.14]   # Far-left
-  camera_position_m: [0.23, 0.0, 0.65]   # Approximate overhead camera [X, Y, Z] for parallax
+    1: [0.205,  0.108]   # Near-left
+    2: [0.205, -0.108]   # Near-right
+    3: [0.49,  0.108]   # Far-left
+    4: [0.49, -0.108]   # Far-right
+    
+  camera_position_m: [0.0, 0.115, 0.45]   # Measured overhead camera [X, Y, Z] in meters (+x forward, +y left)
 
 brain:
   model: "gemini-4-hydrogen"

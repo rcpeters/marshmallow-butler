@@ -1,5 +1,6 @@
 services:
   robot-controller:
+    image: so101-ventuno-q-robot-controller:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -8,9 +9,9 @@ services:
       - .env
     volumes:
       - ./config:/app/config
-      - ./.cache/lerobot:/root/.cache/huggingface/lerobot
       - ./assets:/app/assets
-    # Uncomment verified host devices after Phases 2 & 3 (docker-compose run --no-deps first):
+      - ./data:/app/data
+    # Uncomment verified host devices after Phases 2 & 3:
     # devices:
     #   - /dev/so101_follower:/dev/so101_follower
     #   - /dev/video0:/dev/video0
@@ -18,6 +19,21 @@ services:
     networks:
       - ventuno-net
     restart: unless-stopped
+
+  # Interactive bring-up & calibration container (ignored by `docker compose up`)
+  robot-tools:
+    image: so101-ventuno-q-robot-controller:latest
+    profiles: ["tools"]
+    privileged: true
+    env_file:
+      - .env
+    volumes:
+      - /dev:/dev
+      - ./config:/app/config
+      - ./assets:/app/assets
+      - ./data:/app/data
+    stdin_open: true
+    tty: true
 
   # ---------------------------------------------------------------------------
   # Local AI Voice Assistant Services (Seed once via Arduino App Lab!)

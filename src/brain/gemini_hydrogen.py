@@ -10,10 +10,13 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class PickDropAction(BaseModel):
-    """Single sugar-cube or marshmallow pick-and-drop action."""
+    """Single item pick-and-drop action."""
 
-    item_type: Literal["sugar_cube", "marshmallow"] = Field(
-        description="Item class to grasp so the controller selects the right grip force."
+    item_type: Literal["sugar_cube", "marshmallow", "rigid_object"] = Field(
+        description=(
+            "Gripper profile class: 'sugar_cube', 'marshmallow', or 'rigid_object' "
+            "(for testing with non-food rigid items like a Lego brick, cube, or block)."
+        )
     )
     pick_point: list[int] = Field(
         min_length=2,
@@ -60,11 +63,15 @@ class VerificationResponse(BaseModel):
     spoken_reply: str = Field(description="Short natural wrap-up message for TTS.")
 
 
-_PLAN_SYSTEM_PROMPT = """You are the vision and spatial planner for a tabletop SO-101 robot arm serving sugar cubes and marshmallows into cups.
+_PLAN_SYSTEM_PROMPT = """You are the vision and spatial planner for a tabletop SO-101 robot arm serving sugar cubes, marshmallows, or small rigid test objects (like a Lego brick or block) into cups.
 Given an overhead camera image of the workspace and a user's request:
-1. Check whether at least one cup AND enough requested items (sugar cubes or marshmallows) are clearly visible.
-2. If anything required is missing or the request is unsafe/impossible, set feasible=false, actions=[], and write a helpful short spoken_reply explaining what is missing.
-3. Otherwise set feasible=true and output one action per requested item using normalized [y, x] coordinates on a 0..1000 scale (top-left is [0, 0], bottom-right is [1000, 1000]):
+1. Check whether at least one cup AND enough requested items are clearly visible.
+2. Map each requested item to an item_type grip profile:
+   - 'sugar_cube' for sugar cubes
+   - 'marshmallow' for mini marshmallows or regular marshmallows
+   - 'rigid_object' for other small rigid test items (e.g. Lego, wooden block, die, eraser)
+3. If anything required is missing or the request is unsafe/impossible, set feasible=false, actions=[], and write a helpful short spoken_reply explaining what is missing.
+4. Otherwise set feasible=true and output one action per requested item using normalized [y, x] coordinates on a 0..1000 scale (top-left is [0, 0], bottom-right is [1000, 1000]):
    - pick_point: exact center of the item to grasp.
    - cup_point: center of the open top rim of the target cup.
 Keep spoken_reply concise and friendly (1 short sentence)."""

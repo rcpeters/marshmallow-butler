@@ -179,62 +179,48 @@ With **2× USB webcams + SO-101 Follower (+ optional Leader) + USB Mic & Speaker
    sudo apt-get update && sudo apt-get install -y v4l-utils
    # Log out and back in for group membership to take effect
    ```
-4. Build the `robot-controller` ARM64 Docker image (which handles `ffmpeg`, `libav*-dev`, `lerobot[feetech]`, `google-genai`, `opencv-contrib-python`, and IK inside the container—keeping the host OS clean):
+4. Build the lean `robot-controller` ARM64 Docker image (`python:3.12-slim` + `feetech-servo-sdk` + `google-genai` + `opencv-contrib-python-headless` + NumPy IK—keeping the image ~500 MB instead of pulling 10+ GB of PyTorch/LeRobot deps for Milestone 1):
    ```bash
+   cp -n .env.example .env
    docker compose build robot-controller
    ```
-   - **Pure-Python / Runtime Check (`aarch64`):** `google-genai` and `feetech-servo-sdk` are pure Python (`py3-none-any`) and install cleanly in the ARM64 container. You do **not** need `mujoco` on the VENTUNO Q at runtime (MuJoCo lacks official `linux-aarch64` Python 3.12 PyPI wheels and is only used on your dev PC for simulation).
-   - **IK Solver Check (`aarch64`):** LeRobot's built-in `RobotKinematics` uses `placo` (`pip install "lerobot[kinematics]"`). Test `placo` inside the `Dockerfile` build early—if PyPI has no prebuilt `aarch64` wheel for Python 3.12, the `Dockerfile` can either compile `Rhoban/placo` from source (`cmake`) or install a lightweight NumPy damped-least-squares IK solver for the 6-DOF SO-101.
-   *(Note: `opencv-contrib-python` inside the image includes `cv2.aruco` for mat calibration.)*
+   *(If upgrading to Milestone 2 local VLA training/recording later, add LeRobot on top when needed.)*
 
 ---
 
-### Phase 2 — SO-101 Motor IDs, Port Mapping, Calibration & Teleop (Inside Container)
-> **Tip:** Pass `--no-deps` during Phases 2–3 so the voice containers don't start yet, and leave hardware `devices:` commented out in `docker-compose.yml` until your `udev` symlinks and `/dev/video*` paths are verified (or put `setup` overrides under a `tools` profile).
+### Phase 2 — SO-101 Motor IDs, Port Mapping & Calibration (Inside Container)
+> **Tip:** Phases 2–3 use the `robot-tools` service (`profiles: ["tools"]` in `docker-compose.yml`), which mounts `/dev:/dev` with `privileged: true` so `docker compose run` works cleanly without `--privileged` or `--device` CLI flags (and without starting voice containers).
 
-1. Identify USB serial ports (use temporary `/dev` access during the interactive unplug/replug test so hot-plugged USB nodes appear inside the container):
+1. Identify USB serial ports (hot-plugged USB nodes appear live inside `robot-tools`):
    ```bash
-   docker compose run --rm --no-deps --privileged -v /dev:/dev robot-controller \
-     lerobot-find-port
+   docker compose run --rm robot-tools python3 scripts/find_port.py
    ```
-2. **Assign Motor IDs (Required for newly built kits):** Out-of-the-box STS3215 servos all share factory ID `1`. Unless your vendor pre-programmed them, run `lerobot-setup-motors` inside the container for each arm (with external servo PSU + USB connected, plugging servos one-by-one as prompted):
+2. **Assign Motor IDs (Required for newly built kits):** Out-of-the-box STS3215 servos all share factory ID `1`. Unless your vendor pre-programmed them, run `scripts/setup_motors.py` inside `robot-tools` for your Follower arm (external servo PSU + USB connected, plugging servos one-by-one as prompted):
    ```bash
-   docker compose run --rm --no-deps --device=/dev/ttyACM0 robot-controller \
-     lerobot-setup-motors --robot.type=so101_follower --robot.port=/dev/ttyACM0
-
-   docker compose run --rm --no-deps --device=/dev/ttyACM1 robot-controller \
-     lerobot-setup-motors --teleop.type=so101_leader --teleop.port=/dev/ttyACM1
+   docker compose run --rm robot-tools \
+     python3 scripts/setup_motors.py --port /dev/ttyACM0
    ```
-3. Create persistent `udev` rules on the Ubuntu host in `/etc/udev/rules.d/99-so101.rules` mapping adapter serial numbers (`udevadm info -a -n /dev/ttyACM0 | grep -E "idVendor|idProduct|serial"`) to `/dev/so101_leader` and `/dev/so101_follower`, then reload:
+3. **Pin a stable port name (so `/dev/ttyACM0` doesn't turn into `ttyACM1` after a reboot):**
+   - **Option A (Easiest — check built-in `/dev/serial/by-id/` first):** Run `ls -l /dev/serial/by-id/` on the VENTUNO Q host. If your Follower adapter shows a unique path there (e.g. `/dev/serial/by-id/usb-...-if00`), you can skip `udev` rules completely—just put that path in `.env` (`SO101_FOLLOWER_PORT=...`) and `docker-compose.yml` `devices:`.
+   - **Option B (Custom `/dev/so101_follower` symlink via `udev`):**
+     1. Inspect your adapter's IDs on the VENTUNO Q host (replace `ttyACM0` with the port from Step 1):
+        ```bash
+        udevadm info -q property -n /dev/ttyACM0 | grep -E "ID_VENDOR_ID|ID_MODEL_ID|ID_SERIAL_SHORT"
+        ```
+     2. Create `/etc/udev/rules.d/99-so101.rules` substituting your printed `ID_VENDOR_ID`, `ID_MODEL_ID`, and `ID_SERIAL_SHORT`:
+        ```bash
+        echo 'SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="1a86", ENV{ID_MODEL_ID}=="55d3", ENV{ID_SERIAL_SHORT}=="YOUR_SERIAL", SYMLINK+="so101_follower", MODE="0666"' | sudo tee /etc/udev/rules.d/99-so101.rules
+        ```
+     3. Reload `udev` and verify the `/dev/so101_follower` symlink appears:
+        ```bash
+        sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=tty
+        ls -l /dev/so101_follower
+        ```
+     *(In `docker-compose.yml` `devices:`, map the pinned path—e.g. `/dev/so101_follower:/dev/so101_follower`—and restart `robot-controller` if you unplug/replug the USB cable.)*
+4. Calibrate the Follower arm inside `robot-tools` (saved to `./config/arm_calibration.yaml` via the mounted `./config` volume):
    ```bash
-   sudo udevadm control --reload-rules && sudo udevadm trigger
-   ```
-   *(For `docker-compose.yml` `devices:`, point to the underlying resolved device path or `/dev/serial/by-id/...` and restart the container if a cable is replugged.)*
-4. Calibrate both arms inside the container (saved automatically to `./.cache/lerobot` via bind mount):
-   ```bash
-   docker compose run --rm --no-deps --device=/dev/so101_follower robot-controller \
-     lerobot-calibrate \
-       --robot.type=so101_follower \
-       --robot.port=/dev/so101_follower \
-       --robot.id=so101_follower_main
-
-   docker compose run --rm --no-deps --device=/dev/so101_leader robot-controller \
-     lerobot-calibrate \
-       --teleop.type=so101_leader \
-       --teleop.port=/dev/so101_leader \
-       --teleop.id=so101_leader_main
-   ```
-5. Smoke-test teleoperation inside the container (verifies every joint moves smoothly before running autonomous IK):
-   ```bash
-   docker compose run --rm --no-deps \
-     --device=/dev/so101_follower --device=/dev/so101_leader \
-     robot-controller lerobot-teleoperate \
-       --robot.type=so101_follower \
-       --robot.port=/dev/so101_follower \
-       --robot.id=so101_follower_main \
-       --teleop.type=so101_leader \
-       --teleop.port=/dev/so101_leader \
-       --teleop.id=so101_leader_main
+   docker compose run --rm robot-tools \
+     python3 scripts/calibrate_arm.py --port /dev/so101_follower
    ```
 
 ---
@@ -246,13 +232,13 @@ With **2× USB webcams + SO-101 Follower (+ optional Leader) + USB Mic & Speaker
    v4l2-ctl -d /dev/video0 --list-formats-ext
    ```
 2. Pin stable camera paths via `/dev/v4l/by-id/` (or mapped `/dev/video*` nodes) in `config/hardware.yaml` and uncomment the verified `devices:` entries in `docker-compose.yml`.
-3. Tape 4 printed ArUco markers (`DICT_4X4_50`, IDs `0–3`) to the 4 corners of the workspace mat, measure their `(x, y)` positions relative to the SO-101 Follower base origin, and run calibration inside the container (saves `config/calibration.yaml` via the mounted `./config` volume):
+3. Tape 4 printed ArUco markers (`DICT_4X4_50`, IDs `1–4`) to the 4 corners of the workspace mat, measure their `(x, y)` positions relative to the SO-101 Follower base origin, and run calibration inside `robot-tools` (saves `config/calibration.yaml` via the mounted `./config` volume):
    ```bash
-   docker compose run --rm --no-deps robot-controller python scripts/calibrate_mat.py
+   docker compose run --rm robot-tools python3 scripts/calibrate_mat.py
    ```
-4. **Verify accuracy before live grasping:** Run a dry-run script in the container where Gemini points to a sugar cube and the arm moves to `5 cm` **above** it (`z = 0.05 m`) without descending—visually confirm alignment within ~5 mm!
+4. **Verify accuracy before live grasping:** Run a dry-run script in `robot-tools` where Gemini points to an item and the arm moves to `5 cm` **above** it (`z = 0.05 m`) without descending—visually confirm alignment within ~5 mm!
    ```bash
-   docker compose run --rm --no-deps robot-controller python scripts/test_gemini_point.py --dry-run
+   docker compose run --rm robot-tools python3 scripts/test_gemini_point.py --move-pregrasp
    ```
 
 ---
@@ -317,17 +303,19 @@ Install `pip install arduino-router-bridge` (`from arduino.router_bridge import 
 so101-ventuno-q/
 ├── PLAN.md                   # This project plan & bring-up guide
 ├── docker-compose.yml        # Voice NPU containers (seeded from App Lab) + robot-controller
-├── Dockerfile                # ARM64 Python 3.12 image for robot-controller (lerobot + google-genai)
+├── Dockerfile                # Lean ARM64 Python 3.12 image (feetech-servo-sdk + google-genai)
 ├── .env.example              # GEMINI_API_KEY + device config template
 ├── .gitignore
 ├── config/
 │   ├── hardware.yaml         # Serial ports, camera paths, audio devices, gripper profiles
+│   ├── arm_calibration.yaml  # Saved SO-101 Follower joint midpoints & tick bounds
 │   └── calibration.yaml      # Saved ArUco homography & camera height
 ├── src/
 │   ├── voice/
 │   │   └── gatekeeper.py     # Calls local Whisper/Gemma/TTS containers + handles mic mute lock
 │   ├── hardware/
-│   │   ├── arm.py            # Safety-clamped wrapper around lerobot so101_follower
+│   │   ├── feetech_bus.py    # Pure-Python Feetech STS3215 serial bus driver (scservo_sdk)
+│   │   ├── arm.py            # Safety-clamped SO-101 Follower controller
 │   │   ├── cameras.py        # Dual USB webcam MJPEG reader (overhead + wrist)
 │   │   └── mcu_bridge.py     # Optional STM32 Arduino Router Bridge RPC client
 │   ├── brain/
@@ -340,6 +328,9 @@ so101-ventuno-q/
 ├── firmware/
 │   └── safety_ui/            # Optional STM32H5F5 sketch (E-Stop, LEDs, push-to-talk)
 └── scripts/
+    ├── find_port.py          # Interactive USB serial port finder
+    ├── setup_motors.py       # Assign STS3215 motor IDs (1..6) & 1 Mbps baudrate
+    ├── calibrate_arm.py      # Interactive SO-101 Follower midpoint & range calibration
     ├── calibrate_mat.py      # Interactive ArUco mat calibration helper
     └── test_gemini_point.py  # Smoke-test Gemini pointing & overlay points on webcam frame
 ```
@@ -356,7 +347,7 @@ so101-ventuno-q/
 | 4 | **Cameras** | ✅ Locked | **2× USB Webcams** (1× overhead mat view + 1× wrist view) |
 | 5 | **User Input Interface** | ✅ Locked | **Local Voice Stack** (App Lab NPU containers: KWS + Whisper ASR + local Gemma gatekeeper + Kokoro/Piper TTS) triggering Gemini 4 Hydrogen |
 | 6 | **Servo Power Supplies** | ✅ Confirmed | Separate, labeled PSUs for **Leader** and **Follower** arms |
-| 7 | **Runtime Packaging** | ✅ Locked | **Single Docker Compose workflow (`docker-compose.yml`)** for Phases 2–4: App Lab's `ghcr.io/arduino/app-bricks/` NPU voice containers + custom `robot-controller` container (persistent `./config` & `./.cache/lerobot` mounts + direct `devices:` passthrough) |
+| 7 | **Runtime Packaging** | ✅ Locked | **Single Docker Compose workflow (`docker-compose.yml`)** for Phases 2–4: App Lab's `ghcr.io/arduino/app-bricks/` NPU voice containers + lean `feetech-servo-sdk` `robot-controller` container (persistent `./config` mounts + direct `devices:` passthrough) |
 
 ---
 
