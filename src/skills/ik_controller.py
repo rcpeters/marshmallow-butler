@@ -157,6 +157,22 @@ def compute_close_pct_for_width(
     return max(0.0, min(open_pct - 5.0, round(pct, 1)))
 
 
+def compute_open_pct_for_width(
+    width_m: float,
+    gripper_profiles: dict[str, Any],
+    clearance_m: float = 0.018,
+    max_open_pct: float = 90.0,
+) -> float:
+    """Compute snug approach open_pct = width_m + clearance_m (never wider than max_open_pct)."""
+    max_jaw_width = float(gripper_profiles.get("max_jaw_width_m", 0.055))
+    min_jaw_width = float(gripper_profiles.get("min_jaw_width_m", 0.0))
+    if max_jaw_width <= min_jaw_width:
+        return float(max_open_pct)
+    target_gap = float(width_m) + float(clearance_m)
+    pct = ((target_gap - min_jaw_width) / (max_jaw_width - min_jaw_width)) * 100.0
+    return max(20.0, min(float(max_open_pct), round(pct, 1)))
+
+
 def compute_wrist_roll_deg(
     pinch_axis_world_rad: float,
     pick_xy: tuple[float, float],

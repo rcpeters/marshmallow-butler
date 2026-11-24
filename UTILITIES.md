@@ -18,6 +18,8 @@ Run all utilities from the repo root on your VENTUNO Q using the `robot-tools` c
 | **Joint Audit** | `docker compose run --rm robot-tools python3 scripts/check_joints.py` | Ping all 6 servos, print live angles, and check for 0/4095 wrap risk |
 | **Live Angle Monitor** | `docker compose run --rm robot-tools python3 scripts/check_joints.py --live` | Stream live joint angles (`deg`/`%`) and raw ticks while moving by hand |
 | **Capture Folded Home** | `docker compose run --rm robot-tools python3 scripts/check_joints.py --capture-home` | Record your arm's resting folded pose into `arm.home_pose_deg` |
+| **Calibrate Gripper Width** | `docker compose run --rm robot-tools python3 scripts/check_joints.py --calibrate-gripper` | Fit `min_jaw_width_m` & `max_jaw_width_m` from 2 cm and 5 cm jaw readings |
+| **Test Contact Grip** | `docker compose run --rm robot-tools python3 scripts/check_joints.py --test-grip` | Test STS3215 load/current contact detection safely on the bench |
 | **Servo Flip Wizard** | `docker compose run --rm robot-tools python3 scripts/check_joints.py --check-signs` | Detect `+1.0` vs `-1.0` polarity for each joint and print `joint_signs` YAML |
 | **Mat Calibration (Camera)** | `docker compose run --rm robot-tools python3 scripts/calibrate_mat.py` | Detect ArUco markers `1–4` and save pixel-to-base homography |
 | **Mat Verify & Calibrate (Arm)** | `docker compose run --rm robot-tools python3 scripts/calibrate_mat.py --arm-calibrate` | Move/jog arm over reachable markers to align & calibrate the mat |

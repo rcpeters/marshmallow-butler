@@ -149,12 +149,24 @@ def resolve_toy_pick_heights(
     toy_cfg: dict,
     min_z_m: float,
 ) -> tuple[float, float]:
-    """Compute (z_visual_m, z_pick_m) from Gemini's estimated item height in mm."""
+    """Compute (z_visual_m, z_pick_m) from Gemini's estimated item height in mm.
+
+    For objects under `tall_object_threshold_m` (default 6 cm), tips aim `bite_fraction`
+    (default 0.75 = 3/4 down from the top, i.e., 0.25*h above mat minus tip offset).
+    Taller objects clamp grip depth to `max_jaw_depth_m` below the top so the palm clears.
+    """
     h_m = max(0.002, min(0.120, float(estimated_height_mm) / 1000.0))
     z_visual = min(0.045, max(0.004, h_m * 0.70))
-    tip_offset = float(toy_cfg.get("tip_grab_offset_m", 0.004))
-    max_pick_z = float(toy_cfg.get("max_pick_z_m", 0.025))
-    raw_pick = max(0.0, (h_m * 0.40) - tip_offset)
+    bite_fraction = float(toy_cfg.get("bite_fraction", 0.75))
+    tip_offset = float(toy_cfg.get("tip_grab_offset_m", 0.002))
+    tall_thresh = float(toy_cfg.get("tall_object_threshold_m", 0.060))
+    max_jaw_depth = float(toy_cfg.get("max_jaw_depth_m", 0.045))
+    max_pick_z = float(toy_cfg.get("max_pick_z_m", 0.035))
+
+    if h_m < tall_thresh:
+        raw_pick = max(0.0, h_m * (1.0 - bite_fraction) - tip_offset)
+    else:
+        raw_pick = max(0.0, h_m - max_jaw_depth)
     z_pick = max(float(min_z_m), min(max_pick_z, raw_pick))
     return round(z_visual, 4), round(z_pick, 4)
 

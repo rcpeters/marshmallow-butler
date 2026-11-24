@@ -26,7 +26,7 @@ arm:
   joint_limits_deg:
     shoulder_pan: [-110.0, 110.0]
     shoulder_lift: [-95.0, 95.0]
-    elbow_flex: [-100.0, 178.0]
+    elbow_flex: [-100.0, 181.0]
     wrist_flex: [-100.0, 110.0]
     wrist_roll: [-150.0, 150.0]
     gripper: [0.0, 100.0]
@@ -72,11 +72,20 @@ workspace:
   # Item-specific gripper targets (0 = closed, 100 = fully open)
   gripper_profiles:
     open_pct: 75.0
-    max_jaw_width_m: 0.055    # Measured jaw opening at 100% open (~5.5cm)
-    min_jaw_width_m: 0.000    # Jaw gap at 0% closed
+    max_jaw_width_m: 0.1416    # Calibrated via scripts/check_joints.py --calibrate-gripper (gap at 100%)
+    min_jaw_width_m: 0.0007    # Calibrated gap at 0% closed
+    open_clearance_m: 0.018   # Snug extra clearance above estimated item width (when use_width_estimate=true)
     squeeze_margin_m: 0.006   # Default squeeze margin for compliant TPU jaws
-    use_width_estimate: true  # Estimate width from Gemini pick_box/grasp_p1..p2 to adapt close_pct
+    use_width_estimate: true  # Estimate width from Gemini pick_box/grasp_p1..p2 to adapt open_pct & close_pct
     enforce_max_width: true   # Refuse items wider than current open jaw gap instead of jamming
+    # STS3215 hardware load/stall tactile grasp (test thresholds with check_joints.py --test-grip first)
+    contact_detection:
+      enabled: true
+      item_types: ["rigid_object", "sugar_cube"] # Tactile stop for hard items; marshmallows use close_pct
+      load_threshold: 350     # Hard cap (0..1000) above normal ~195 free-closing PWM load
+      load_delta: 90          # Firm contact rise above baseline before clamping
+      torque_limit: 650       # Closing torque limit (0..1000) for solid TPU grip
+      squeeze_extra_pct: 7.0  # Press ~5-6mm deeper into compliant TPU after contact triggers
     sugar_cube:
       close_pct: 22.0
     marshmallow:
@@ -93,8 +102,11 @@ workspace:
     use_wrist_roll: true      # Align wrist_roll to narrowest grasp axis
     wrist_zero_pinch_axis: "y" # Pinch axis when wrist_roll=0 ("y" lateral or "x" radial)
     wrist_roll_window_deg: [-40.0, 140.0] # 180-deg symmetric window avoiding servo ID 5 wrap (< -56 deg)
-    tip_grab_offset_m: 0.004  # Grab slightly below mid-height for TPU contact pads
-    max_pick_z_m: 0.025
+    bite_fraction: 0.75       # Aim tips 3/4 down from top (1/4 above mat) for items < 6cm tall
+    tall_object_threshold_m: 0.060
+    max_jaw_depth_m: 0.045    # Max jaw pocket depth for >= 6cm items so gripper palm clears top
+    tip_grab_offset_m: 0.002  # Extra 2mm deep margin for compliant TPU pad flex
+    max_pick_z_m: 0.035
 
 cameras:
   overhead:

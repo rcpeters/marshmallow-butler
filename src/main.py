@@ -30,6 +30,7 @@ from src.skills.ik_controller import (
     SO101Kinematics,
     build_cup_safe_waypoints,
     compute_close_pct_for_width,
+    compute_open_pct_for_width,
     compute_wrist_roll_deg,
 )
 from src.voice.gatekeeper import VoiceGatekeeper
@@ -93,17 +94,24 @@ def compute_action_targets(
     width_m = pinch_w_m if pinch_w_m > 0.002 else box_w_m
     length_m = max(width_m, box_l_m)
 
-    open_pct = float(toy_cfg.get("open_pct", profiles["open_pct"])) if mode == "toy" else float(profiles["open_pct"])
+    max_open_pct = (
+        float(toy_cfg.get("open_pct", profiles["open_pct"])) if mode == "toy" else float(profiles["open_pct"])
+    )
     max_jaw_m = float(profiles.get("max_jaw_width_m", 0.055))
     min_jaw_m = float(profiles.get("min_jaw_width_m", 0.0))
-    open_jaw_limit_m = min_jaw_m + (open_pct / 100.0) * (max_jaw_m - min_jaw_m)
+    open_jaw_limit_m = min_jaw_m + (max_open_pct / 100.0) * (max_jaw_m - min_jaw_m)
     too_wide = bool(profiles.get("enforce_max_width", True) and width_m > open_jaw_limit_m)
 
     if profiles.get("use_width_estimate", False):
+        clearance_m = float(profiles.get("open_clearance_m", 0.018))
+        open_pct = compute_open_pct_for_width(
+            width_m, profiles, clearance_m=clearance_m, max_open_pct=max_open_pct
+        )
         close_pct = compute_close_pct_for_width(
             width_m, {**profiles, "open_pct": open_pct}, action.item_type
         )
     else:
+        open_pct = max_open_pct
         close_pct = float(profiles[action.item_type]["close_pct"])
 
     wrist_roll_deg = (
@@ -250,6 +258,8 @@ class DrinkAssistantOrchestrator:
             debug_path.parent.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(debug_path), annotated)
 
+        contact_cfg = ws.get("gripper_profiles", {}).get("contact_detection") or {}
+        apply_types = contact_cfg.get("item_types")
         for action, t in resolved_list:
             waypoints = build_cup_safe_waypoints(
                 ik=self.kinematics,
@@ -262,7 +272,11 @@ class DrinkAssistantOrchestrator:
                 open_pct_override=t.open_pct,
                 wrist_roll_deg=t.wrist_roll_deg,
             )
-            self.arm.execute_waypoints(waypoints)
+            use_contact = bool(contact_cfg.get("enabled", False)) and (
+                not apply_types or action.item_type in apply_types
+            )
+            action_contact = {**contact_cfg, "enabled": use_contact} if use_contact else None
+            self.arm.execute_waypoints(waypoints, contact_cfg=action_contact)
         return True
 
     def handle_request(self, request_text: str) -> bool:

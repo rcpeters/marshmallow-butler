@@ -5,14 +5,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.brain.gemini_hydrogen import norm_yx_to_pixel
-from src.hardware.arm import SafeSO101Arm
-from src.hardware.feetech_bus import ArmCalibration, JointCalibration, joints_to_ticks
 from scripts.calibrate_mat import parse_jog_command
-from scripts.check_joints import audit_joint_calibration
+from scripts.check_joints import audit_joint_calibration, fit_gripper_width_range
 from src.brain.gemini_hydrogen import PickDropAction, norm_yx_to_pixel
 from src.hardware.arm import SafeSO101Arm
-from src.hardware.feetech_bus import ArmCalibration, JointCalibration, joints_to_ticks
+from src.hardware.feetech_bus import ArmCalibration, JointCalibration, decode_sts_load, joints_to_ticks
 from src.skills.calibration import (
     MatCalibration,
     align_corner_markers_from_measured,
@@ -26,6 +23,7 @@ from src.skills.ik_controller import (
     SO101Kinematics,
     build_cup_safe_waypoints,
     compute_close_pct_for_width,
+    compute_open_pct_for_width,
     compute_wrist_roll_deg,
 )
 from src.voice.gatekeeper import parse_gatekeeper_json
@@ -418,13 +416,24 @@ def test_pick_box_width_estimation_and_adaptive_close_pct() -> None:
 
 
 def test_toy_mode_heights_roll_window_and_gatekeeper_switch() -> None:
-    zv_coin, zp_coin = resolve_toy_pick_heights(2, {"tip_grab_offset_m": 0.004, "max_pick_z_m": 0.025}, min_z_m=-0.003)
+    toy_ht_cfg = {
+        "bite_fraction": 0.75,
+        "tall_object_threshold_m": 0.060,
+        "max_jaw_depth_m": 0.045,
+        "tip_grab_offset_m": 0.002,
+        "max_pick_z_m": 0.035,
+    }
+    zv_coin, zp_coin = resolve_toy_pick_heights(2, toy_ht_cfg, min_z_m=-0.003)
     assert zv_coin == pytest.approx(0.004)
     assert zp_coin == pytest.approx(0.0)
 
-    zv_block, zp_block = resolve_toy_pick_heights(30, {"tip_grab_offset_m": 0.004, "max_pick_z_m": 0.025}, min_z_m=-0.003)
-    assert zv_block == pytest.approx(0.021)
-    assert zp_block == pytest.approx(0.008)
+    zv_toy, zp_toy = resolve_toy_pick_heights(40, toy_ht_cfg, min_z_m=-0.003)
+    assert zv_toy == pytest.approx(0.028)
+    assert zp_toy == pytest.approx(0.008)
+
+    zv_tall, zp_tall = resolve_toy_pick_heights(70, toy_ht_cfg, min_z_m=-0.003)
+    assert zv_tall == pytest.approx(0.045)
+    assert zp_tall == pytest.approx(0.025)
 
     kin_cfg = {
         "joint_signs": {"wrist_roll": -1.0},
@@ -442,3 +451,50 @@ def test_toy_mode_heights_roll_window_and_gatekeeper_switch() -> None:
     assert switch_decision.dispatch is False
     assert switch_decision.mode_switch == "toy"
     assert switch_decision.reply == "Toy mode ready!"
+
+
+def test_gripper_2cm_5cm_fit_snug_open_and_sts_contact() -> None:
+    min_w, max_w = fit_gripper_width_range(25.0, 0.020, 62.5, 0.050)
+    assert min_w == pytest.approx(0.0)
+    assert max_w == pytest.approx(0.080)
+
+    profiles = {"min_jaw_width_m": min_w, "max_jaw_width_m": max_w}
+    assert compute_open_pct_for_width(0.016, profiles, clearance_m=0.018, max_open_pct=90.0) == pytest.approx(42.5)
+    assert compute_open_pct_for_width(0.080, profiles, clearance_m=0.018, max_open_pct=90.0) == pytest.approx(90.0)
+
+    assert decode_sts_load(250) == 250
+    assert decode_sts_load(0x0400 | 310) == -310
+
+    arm_cfg = {
+        "port": "/dev/null",
+        "id": "test",
+        "home_pose_deg": {
+            "shoulder_pan": 0.0,
+            "shoulder_lift": -35.0,
+            "elbow_flex": 75.0,
+            "wrist_flex": 40.0,
+            "wrist_roll": 0.0,
+            "gripper": 70.0,
+        },
+        "joint_limits_deg": {
+            "shoulder_pan": [-110.0, 110.0],
+            "shoulder_lift": [-95.0, 95.0],
+            "elbow_flex": [-100.0, 178.0],
+            "wrist_flex": [-100.0, 110.0],
+            "wrist_roll": [-150.0, 150.0],
+            "gripper": [0.0, 100.0],
+        },
+    }
+    wps = build_cup_safe_waypoints(
+        SO101Kinematics(_sample_kin_cfg()),
+        (0.18, 0.06, 0.012),
+        (0.22, -0.06, 0.110),
+        "rigid_object",
+        _sample_workspace_cfg(),
+        arm_cfg["home_pose_deg"],
+    )
+    with SafeSO101Arm(arm_cfg, dry_run=True) as arm:
+        res = arm.execute_waypoints(wps, contact_cfg={"enabled": True, "min_close_pct": 12.0})
+        assert res is not None
+        assert res.contact_detected is True
+        assert res.final_pct == pytest.approx(12.0)

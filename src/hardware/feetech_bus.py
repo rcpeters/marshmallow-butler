@@ -30,6 +30,15 @@ STS_REG_GOAL_POSITION_L = 42
 STS_REG_TORQUE_LIMIT_L = 48
 STS_REG_LOCK = 55
 STS_REG_PRESENT_POSITION_L = 56
+STS_REG_PRESENT_SPEED_L = 58
+STS_REG_PRESENT_LOAD_L = 60
+STS_REG_PRESENT_CURRENT_L = 69
+
+
+def decode_sts_load(raw_word: int) -> int:
+    """Decode STS3215 Present Load (bits 0-9 = magnitude 0..1000, bit 10 = direction)."""
+    mag = int(raw_word) & 0x03FF
+    return -mag if (int(raw_word) & 0x0400) else mag
 
 
 @dataclass(frozen=True)
@@ -165,6 +174,33 @@ class FeetechArmBus:
         )
         if comm != self._comm_success or err != 0:
             raise RuntimeError(f"Failed writing motor ID {motor_id}: comm={comm}, err={err}")
+
+    def read_load(self, motor_id: int) -> int:
+        """Read signed STS3215 Present Load (-1000..1000, i.e. tenths of percent)."""
+        raw, comm, err = self._packet_handler.read2ByteTxRx(
+            self._port_handler, motor_id, STS_REG_PRESENT_LOAD_L
+        )
+        if comm != self._comm_success or err != 0:
+            raise RuntimeError(f"Failed reading load on motor ID {motor_id}: comm={comm}, err={err}")
+        return decode_sts_load(int(raw))
+
+    def read_current_ma(self, motor_id: int) -> float:
+        """Read motor current magnitude in mA (6.5 mA per STS3215 count)."""
+        raw, comm, err = self._packet_handler.read2ByteTxRx(
+            self._port_handler, motor_id, STS_REG_PRESENT_CURRENT_L
+        )
+        if comm != self._comm_success or err != 0:
+            raise RuntimeError(f"Failed reading current on motor ID {motor_id}: comm={comm}, err={err}")
+        return float(int(raw) & 0x7FFF) * 6.5
+
+    def set_torque_limit(self, motor_id: int, limit_0_to_1000: int) -> None:
+        """Set RAM Moving Torque Limit (0..1000 = 0%..100% max torque)."""
+        clamped = max(0, min(1000, int(limit_0_to_1000)))
+        comm, err = self._packet_handler.write2ByteTxRx(
+            self._port_handler, motor_id, STS_REG_TORQUE_LIMIT_L, clamped
+        )
+        if comm != self._comm_success or err != 0:
+            raise RuntimeError(f"Failed setting torque limit on ID {motor_id}: comm={comm}, err={err}")
 
     def set_motor_id_and_baud(self, current_id: int, new_id: int, baud_index: int = 0) -> None:
         """Assign EPROM motor ID and baudrate index (0 = 1,000,000 bps)."""

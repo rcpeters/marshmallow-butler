@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.config import load_hardware_config
+from src.hardware.arm import SafeSO101Arm
 from src.hardware.feetech_bus import (
     DEFAULT_SO101_MOTOR_IDS,
     STS_STEPS_PER_REV,
@@ -157,6 +158,120 @@ def _run_capture_home(bus: FeetechArmBus, cal: ArmCalibration, config_path: str)
             print(f"Could not update {config_path} in-place; paste the block above manually.")
 
 
+def fit_gripper_width_range(
+    pct_low: float,
+    width_low_m: float,
+    pct_high: float,
+    width_high_m: float,
+) -> tuple[float, float]:
+    """Fit linear (min_jaw_width_m, max_jaw_width_m) at 0% and 100% from 2 jaw gap samples."""
+    if width_high_m <= width_low_m:
+        raise ValueError("High jaw gap must exceed low jaw gap.")
+    if pct_high <= pct_low:
+        raise ValueError(
+            f"Gripper % at {width_high_m*100:.1f}cm ({pct_high:.1f}%) must exceed % at "
+            f"{width_low_m*100:.1f}cm ({pct_low:.1f}%)."
+        )
+    pct_per_m = (pct_high - pct_low) / (width_high_m - width_low_m)
+    min_w = width_low_m - (pct_low / pct_per_m)
+    max_w = width_low_m + ((100.0 - pct_low) / pct_per_m)
+    return round(min_w, 4), round(max_w, 4)
+
+
+def _update_jaw_widths_in_yaml(config_path: str | Path, min_w_m: float, max_w_m: float) -> bool:
+    """Update min_jaw_width_m and max_jaw_width_m in config/hardware.yaml preserving comments."""
+    path = Path(config_path)
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    updated = 0
+    new_lines: list[str] = []
+    repl = {"min_jaw_width_m": min_w_m, "max_jaw_width_m": max_w_m}
+
+    for line in lines:
+        m = re.match(r"^(\s+)(min_jaw_width_m|max_jaw_width_m):\s*[-+0-9.eE]+(.*)$", line.rstrip("\r\n"))
+        if m and not line.lstrip().startswith("#"):
+            indent, key, suffix = m.group(1), m.group(2), m.group(3)
+            eol = "\r\n" if line.endswith("\r\n") else "\n"
+            line = f"{indent}{key}: {repl[key]:.4f}{suffix}{eol}"
+            updated += 1
+        new_lines.append(line)
+
+    if updated != 2:
+        return False
+    path.write_text("".join(new_lines), encoding="utf-8")
+    return True
+
+
+def _run_calibrate_gripper(
+    bus: FeetechArmBus,
+    cal: ArmCalibration,
+    config_path: str,
+    low_cm: float = 2.0,
+    high_cm: float = 5.0,
+) -> None:
+    grip_cal = cal.joints["gripper"]
+    mid = grip_cal.motor_id
+    print("\n=== 2-Point Gripper Width Calibration (Torque OFF) ===")
+
+    input(f"Place jaws cleanly at {low_cm:.1f} cm apart (e.g. around a {low_cm:.1f} cm spacer), then press Enter...")
+    tick_low = bus.read_position(mid)
+    pct_low = grip_cal.tick_to_pct(tick_low)
+    print(f"  Recorded {low_cm:.1f} cm: tick={tick_low} ({pct_low:.1f}%)")
+
+    input(f"Place jaws cleanly at {high_cm:.1f} cm apart (e.g. around a {high_cm:.1f} cm spacer), then press Enter...")
+    tick_high = bus.read_position(mid)
+    pct_high = grip_cal.tick_to_pct(tick_high)
+    print(f"  Recorded {high_cm:.1f} cm: tick={tick_high} ({pct_high:.1f}%)")
+
+    min_w_m, max_w_m = fit_gripper_width_range(pct_low, low_cm / 100.0, pct_high, high_cm / 100.0)
+    print("\n=== Fitted Gripper Gap Mapping ===")
+    print(f"  min_jaw_width_m (  0%): {min_w_m:.4f} m ({min_w_m * 100:.2f} cm)")
+    print(f"  max_jaw_width_m (100%): {max_w_m:.4f} m ({max_w_m * 100:.2f} cm)")
+    for sample_pct in (0, 25, 50, 75, 100):
+        gap_cm = (min_w_m + (sample_pct / 100.0) * (max_w_m - min_w_m)) * 100.0
+        print(f"    {sample_pct:3d}% -> {gap_cm:.2f} cm")
+
+    ans = input(f"\nUpdate min_jaw_width_m & max_jaw_width_m in {config_path}? [y/N]: ").strip().lower()
+    if ans in ("y", "yes"):
+        if _update_jaw_widths_in_yaml(config_path, min_w_m, max_w_m):
+            print(f"Updated gripper jaw calibration in {config_path}.")
+        else:
+            print(f"Could not update {config_path} in-place; paste the values above manually.")
+
+
+def _run_test_grip(cfg: dict, threshold_override: int | None = None, delta_override: int | None = None) -> None:
+    profiles = cfg["workspace"]["gripper_profiles"]
+    contact_cfg = profiles.get("contact_detection", {})
+    load_thresh = int(threshold_override if threshold_override is not None else contact_cfg.get("load_threshold", 270))
+    load_delta = int(delta_override if delta_override is not None else contact_cfg.get("load_delta", 65))
+    torque_limit = int(contact_cfg.get("torque_limit", 450))
+    squeeze_extra = float(contact_cfg.get("squeeze_extra_pct", 3.0))
+    min_w = float(profiles.get("min_jaw_width_m", 0.0))
+    max_w = float(profiles.get("max_jaw_width_m", 0.055))
+
+    print(f"\n=== STS3215 Contact-Detection Grip Bench Test (load_delta={load_delta}, cap={load_thresh}) ===")
+    with SafeSO101Arm(cfg["arm"]) as arm:
+        pose = arm.get_current_pose_deg()
+        pose["gripper"] = 70.0
+        arm.move_to_joints(pose, duration_s=0.6)
+        input("Hold a marshmallow/object between jaws (or leave empty to test empty stop), then press Enter...")
+        res = arm.close_gripper_until_contact(
+            min_close_pct=0.0,
+            load_threshold=load_thresh,
+            load_delta=load_delta,
+            torque_limit=torque_limit,
+            squeeze_extra_pct=squeeze_extra,
+            trace=True,
+        )
+        est_gap_cm = (min_w + (res.final_pct / 100.0) * (max_w - min_w)) * 100.0
+        print(
+            f"  Result: contact_detected={res.contact_detected} | final={res.final_pct:.1f}% "
+            f"(~{est_gap_cm:.2f} cm) | peak_load={res.peak_load}/1000 | peak_current={res.peak_current_ma:.0f} mA"
+        )
+        input("Press Enter to open jaws and release torque...")
+        pose["gripper"] = 60.0
+        arm.move_to_joints(pose, duration_s=0.5)
+
+
 def _run_sign_wizard(bus: FeetechArmBus, motor_ids: dict[str, int]) -> None:
     print("\n=== Interactive Servo Direction / Polarity Wizard (Torque OFF) ===")
     print("First, hold the arm STRAIGHT UPRIGHT (flagpole pose, gripper half-open).")
@@ -216,9 +331,36 @@ def main() -> None:
     parser.add_argument("--live", action="store_true", help="Continuously stream joint angles & ticks.")
     parser.add_argument("--check-signs", action="store_true", help="Run interactive servo polarity wizard.")
     parser.add_argument("--capture-home", action="store_true", help="Record folded rest pose into home_pose_deg.")
+    parser.add_argument(
+        "--calibrate-gripper",
+        action="store_true",
+        help="Calibrate gripper jaw width at 2cm and 5cm into config/hardware.yaml.",
+    )
+    parser.add_argument("--low-cm", type=float, default=2.0, help="Small gripper gauge width in cm (default: 2.0).")
+    parser.add_argument("--high-cm", type=float, default=5.0, help="Large gripper gauge width in cm (default: 5.0).")
+    parser.add_argument(
+        "--test-grip",
+        action="store_true",
+        help="Test STS3215 load/current contact detection stationary on the gripper.",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=int,
+        default=None,
+        help="Override hard load_threshold cap (0..1000) for --test-grip.",
+    )
+    parser.add_argument(
+        "--delta",
+        type=int,
+        default=None,
+        help="Override baseline load_delta rise (0..1000) for --test-grip.",
+    )
     args = parser.parse_args()
 
     cfg = load_hardware_config(args.config)
+    if args.test_grip:
+        _run_test_grip(cfg, threshold_override=args.threshold, delta_override=args.delta)
+        return
     arm_cfg = cfg["arm"]
     port = args.port or arm_cfg["port"]
     baudrate = int(arm_cfg.get("baudrate", 1_000_000))
@@ -246,6 +388,9 @@ def main() -> None:
         elif args.capture_home:
             assert cal is not None
             _run_capture_home(bus, cal, args.config)
+        elif args.calibrate_gripper:
+            assert cal is not None
+            _run_calibrate_gripper(bus, cal, args.config, low_cm=args.low_cm, high_cm=args.high_cm)
         elif args.live:
             assert cal is not None
             _run_live(bus, cal)
