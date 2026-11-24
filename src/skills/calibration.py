@@ -115,11 +115,48 @@ def estimate_item_box_m(
     workspace_cfg: dict,
     item_type: str,
     box_yx: list[int],
+    z_visual_override_m: float | None = None,
 ) -> tuple[float, float]:
-    """Estimate item (width_m, length_m) using its configured visual parallax height."""
-    z_pick = float(workspace_cfg["item_pick_z_m"][item_type])
-    z_visual = float(workspace_cfg.get("item_point_z_m", {}).get(item_type, z_pick))
+    """Estimate item (width_m, length_m) using its visual parallax height."""
+    if z_visual_override_m is not None:
+        z_visual = float(z_visual_override_m)
+    else:
+        z_pick = float(workspace_cfg["item_pick_z_m"][item_type])
+        z_visual = float(workspace_cfg.get("item_point_z_m", {}).get(item_type, z_pick))
     return estimate_box_dimensions_m(calibration, box_yx, z_visual_m=z_visual)
+
+
+def estimate_grasp_span_and_angle_rad(
+    calibration: MatCalibration,
+    p1_yx: list[int],
+    p2_yx: list[int],
+    z_visual_m: float = 0.0,
+) -> tuple[float, float]:
+    """Project opposite narrow-axis grasp points to (pinch_width_m, world_angle_rad)."""
+    u1 = (p1_yx[1] / 1000.0) * calibration.image_width
+    v1 = (p1_yx[0] / 1000.0) * calibration.image_height
+    u2 = (p2_yx[1] / 1000.0) * calibration.image_width
+    v2 = (p2_yx[0] / 1000.0) * calibration.image_height
+
+    x1, y1, _ = calibration.pixel_to_base_xyz(u1, v1, z_target_m=z_visual_m)
+    x2, y2, _ = calibration.pixel_to_base_xyz(u2, v2, z_target_m=z_visual_m)
+    dx, dy = x2 - x1, y2 - y1
+    return math.hypot(dx, dy), math.atan2(dy, dx)
+
+
+def resolve_toy_pick_heights(
+    estimated_height_mm: float,
+    toy_cfg: dict,
+    min_z_m: float,
+) -> tuple[float, float]:
+    """Compute (z_visual_m, z_pick_m) from Gemini's estimated item height in mm."""
+    h_m = max(0.002, min(0.120, float(estimated_height_mm) / 1000.0))
+    z_visual = min(0.045, max(0.004, h_m * 0.70))
+    tip_offset = float(toy_cfg.get("tip_grab_offset_m", 0.004))
+    max_pick_z = float(toy_cfg.get("max_pick_z_m", 0.025))
+    raw_pick = max(0.0, (h_m * 0.40) - tip_offset)
+    z_pick = max(float(min_z_m), min(max_pick_z, raw_pick))
+    return round(z_visual, 4), round(z_pick, 4)
 
 
 def _get_aruco_detector(dict_name: str) -> cv2.aruco.ArucoDetector:

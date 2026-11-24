@@ -35,7 +35,7 @@ kinematics:
   # Effective link lengths (meters) for the pure-NumPy SO-101 fallback solver
   # Calibrated against physical SO-101 hand-hover measurements
   base_height_m: 0.125
-  shoulder_offset_x_m: 0.045
+  shoulder_offset_x_m: 0.0375
   upper_arm_m: 0.116
   forearm_m: 0.135
   wrist_to_tip_m: 0.170
@@ -75,7 +75,8 @@ workspace:
     max_jaw_width_m: 0.055    # Measured jaw opening at 100% open (~5.5cm)
     min_jaw_width_m: 0.000    # Jaw gap at 0% closed
     squeeze_margin_m: 0.006   # Default squeeze margin for compliant TPU jaws
-    use_width_estimate: true  # Estimate width from Gemini pick_box to adapt close_pct
+    use_width_estimate: true  # Estimate width from Gemini pick_box/grasp_p1..p2 to adapt close_pct
+    enforce_max_width: true   # Refuse items wider than current open jaw gap instead of jamming
     sugar_cube:
       close_pct: 22.0
     marshmallow:
@@ -83,6 +84,17 @@ workspace:
       squeeze_margin_m: 0.016 # Mini marshmallows (~15mm) close to 0%; jumbo (~30mm) closes ~25%
     rigid_object:
       close_pct: 18.0         # Firm grasp for small rigid test objects (e.g. Lego)
+
+  # Behavior when switched to toy mode (--toy-mode or "toy mode" command)
+  default_mode: "cocoa"       # "cocoa" (kid-safe drink treats only) or "toy" (general mini-manipulator)
+  toy_mode:
+    open_pct: 90.0            # Open wider (~5cm) in toy mode for varied tabletop objects
+    use_estimated_height: true
+    use_wrist_roll: true      # Align wrist_roll to narrowest grasp axis
+    wrist_zero_pinch_axis: "y" # Pinch axis when wrist_roll=0 ("y" lateral or "x" radial)
+    wrist_roll_window_deg: [-40.0, 140.0] # 180-deg symmetric window avoiding servo ID 5 wrap (< -56 deg)
+    tip_grab_offset_m: 0.004  # Grab slightly below mid-height for TPU contact pads
+    max_pick_z_m: 0.025
 
 cameras:
   overhead:

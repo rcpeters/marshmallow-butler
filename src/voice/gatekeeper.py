@@ -10,19 +10,30 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
-_GEMMA_SYSTEM_PROMPT = """You are the local voice gatekeeper for a tabletop robot that puts sugar cubes, marshmallows, or small requested test objects (such as a Lego or block) into cups.
-Given a transcript heard from the room microphone, decide if a person is explicitly asking the robot to pick up an item and put it in a cup.
-Respond ONLY with valid JSON matching:
-{"dispatch": boolean, "reply": string, "request_text": string}
+_GEMMA_PROMPT_COCOA = """You are the local voice gatekeeper for a kid-friendly hot cocoa Marshmallow Butler robot.
+In COCOA MODE, the robot ONLY puts edible drink treats (marshmallows, sugar cubes, small candies) into cups—never toys or non-food objects.
+Given a transcript heard from the room microphone, respond ONLY with valid JSON matching:
+{"dispatch": boolean, "mode_switch": "none" | "cocoa" | "toy", "reply": string, "request_text": string}
 Rules:
-- If the transcript is background noise, unrelated conversation, or not a request to put an item in a cup, set dispatch=false, reply="", request_text="".
-- If it IS a valid request (e.g. "put a marshmallow in my cup", "two sugar cubes please", "put the red lego in the cup"), set dispatch=true, write a brief friendly confirmation in reply (e.g. "Got it! Grabbing that for your cup."), and put the clean normalized instruction in request_text."""
+- If the person asks to switch modes (e.g. "switch to toy mode", "play mode", "tidy up mode"), set dispatch=false, mode_switch="toy", reply="Toy mode ready! Ask me to put any small safe object in the cup.", request_text="".
+- If the transcript is background noise or unrelated conversation, set dispatch=false, mode_switch="none", reply="", request_text="".
+- If they ask to put a non-food item (Lego, coin, toy, battery, etc.) in cocoa mode, set dispatch=false, mode_switch="none", reply="I'm in cocoa mode, so I only serve marshmallows or drink treats! Say switch to toy mode for small toys.", request_text="".
+- If it IS a valid treat request (e.g. "put a marshmallow in my cup", "two sugar cubes please"), set dispatch=true, mode_switch="none", write a brief friendly confirmation in reply, and put the clean instruction in request_text."""
+
+_GEMMA_PROMPT_TOY = """You are the local voice gatekeeper for a tabletop SO-101 robot arm in TOY / FREE-PICK MODE.
+In TOY MODE, the robot can pick up any small, lightweight, dry tabletop object (Lego, block, marshmallow, eraser, die, small toy) and put it in the cup.
+Given a transcript heard from the room microphone, respond ONLY with valid JSON matching:
+{"dispatch": boolean, "mode_switch": "none" | "cocoa" | "toy", "reply": string, "request_text": string}
+Rules:
+- If the person asks to return to cocoa/drink mode (e.g. "cocoa mode", "back to hot chocolate mode"), set dispatch=false, mode_switch="cocoa", reply="Back to cocoa mode—food treats only!", request_text="".
+- If the transcript is background noise or unrelated conversation, set dispatch=false, mode_switch="none", reply="", request_text="".
+- If it IS a valid pick-and-place request (e.g. "put the red lego in the cup", "clean up the block", "grab that eraser"), set dispatch=true, mode_switch="none", write a brief friendly confirmation in reply, and put the clean instruction in request_text."""
 
 
 @dataclass(frozen=True)
@@ -32,6 +43,7 @@ class GatekeeperDecision:
     dispatch: bool
     reply: str
     request_text: str
+    mode_switch: Literal["none", "cocoa", "toy"] = "none"
 
 
 def parse_gatekeeper_json(raw_text: str) -> GatekeeperDecision:
@@ -42,10 +54,15 @@ def parse_gatekeeper_json(raw_text: str) -> GatekeeperDecision:
         cleaned = "\n".join(line for line in lines if not line.strip().startswith("```")).strip()
 
     data = json.loads(cleaned)
+    raw_mode = str(data.get("mode_switch", "none")).strip().lower()
+    mode_switch: Literal["none", "cocoa", "toy"] = (
+        raw_mode if raw_mode in ("none", "cocoa", "toy") else "none"  # type: ignore[assignment]
+    )
     return GatekeeperDecision(
         dispatch=bool(data.get("dispatch", False)),
         reply=str(data.get("reply", "")).strip(),
         request_text=str(data.get("request_text", "")).strip(),
+        mode_switch=mode_switch,
     )
 
 
@@ -76,16 +93,22 @@ class VoiceGatekeeper:
                 time.sleep(self.mute_padding_s)
             self._mute_event.clear()
 
-    def evaluate_transcript(self, transcript: str, timeout_s: float = 15.0) -> GatekeeperDecision:
+    def evaluate_transcript(
+        self,
+        transcript: str,
+        mode: Literal["cocoa", "toy"] = "cocoa",
+        timeout_s: float = 15.0,
+    ) -> GatekeeperDecision:
         """Send an ASR transcript to local Gemma to filter chatter vs. actionable requests."""
         text = transcript.strip()
         if not text:
             return GatekeeperDecision(dispatch=False, reply="", request_text="")
 
+        system_prompt = _GEMMA_PROMPT_TOY if mode == "toy" else _GEMMA_PROMPT_COCOA
         payload = {
             "model": self.gemma_model,
             "messages": [
-                {"role": "system", "content": _GEMMA_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text},
             ],
             "temperature": 0.0,

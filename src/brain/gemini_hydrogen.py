@@ -28,13 +28,28 @@ class PickDropAction(BaseModel):
         max_length=4,
         description="Normalized [ymin, xmin, ymax, xmax] (0-1000) tight bounding box around the target item.",
     )
+    grasp_p1: list[int] = Field(
+        min_length=2,
+        max_length=2,
+        description="Normalized [y, x] (0-1000) on one outer edge of the item's narrowest grasp axis.",
+    )
+    grasp_p2: list[int] = Field(
+        min_length=2,
+        max_length=2,
+        description="Normalized [y, x] (0-1000) on the opposite outer edge of the narrowest grasp axis.",
+    )
+    estimated_height_mm: int = Field(
+        ge=1,
+        le=120,
+        description="Estimated physical height of the target item above the mat in millimeters (e.g. 15 for mini marshmallow, 10 for Lego brick, 2 for coin).",
+    )
     cup_point: list[int] = Field(
         min_length=2,
         max_length=2,
         description="Normalized [y, x] (0-1000) center of the cup opening.",
     )
 
-    @field_validator("pick_point", "cup_point")
+    @field_validator("pick_point", "grasp_p1", "grasp_p2", "cup_point")
     @classmethod
     def _validate_normalized_point(cls, pts: list[int]) -> list[int]:
         y, x = pts
@@ -76,17 +91,37 @@ class VerificationResponse(BaseModel):
     spoken_reply: str = Field(description="Short natural wrap-up message for TTS.")
 
 
-_PLAN_SYSTEM_PROMPT = """You are the vision and spatial planner for a tabletop SO-101 robot arm serving sugar cubes, marshmallows, or small rigid test objects (like a Lego brick or block) into cups.
+_PLAN_PROMPT_COCOA = """You are the vision and spatial planner for a kid-safe hot cocoa Marshmallow Butler robot arm (SO-101).
+MODE: COCOA MODE (edible drink treats ONLY).
 Given an overhead camera image of the workspace and a user's request:
-1. Check whether at least one cup AND enough requested items are clearly visible.
-2. Map each requested item to an item_type grip profile:
-   - 'sugar_cube' for sugar cubes
-   - 'marshmallow' for mini marshmallows or regular marshmallows
-   - 'rigid_object' for other small rigid test items (e.g. Lego, wooden block, die, eraser)
-3. If anything required is missing or the request is unsafe/impossible, set feasible=false, actions=[], and write a helpful short spoken_reply explaining what is missing.
-4. Otherwise set feasible=true and output one action per requested item using normalized [y, x] coordinates on a 0..1000 scale (top-left is [0, 0], bottom-right is [1000, 1000]):
+1. Check whether a cup AND the requested drink treat (marshmallows, sugar cubes, or small drink-safe candy/biscuit) are clearly visible.
+2. SAFETY GATE: If the user asks for a non-food object (Lego, coin, toy, battery, eraser, hardware, etc.), refuse by setting feasible=false, actions=[], and explaining in spoken_reply that cocoa mode only puts drink treats into cocoa cups (suggest switching to toy mode for non-food items).
+3. Map each treat to item_type:
+   - 'sugar_cube' for sugar cubes or hard small candies
+   - 'marshmallow' for mini marshmallows, regular marshmallows, or soft treats
+4. If anything required is missing or the item looks too wide (>5 cm) or unsafe, set feasible=false, actions=[], and explain kindly in spoken_reply.
+5. Otherwise set feasible=true and output one action per requested item using normalized [y, x] coordinates on a 0..1000 scale (top-left is [0, 0], bottom-right is [1000, 1000]):
    - pick_point: exact center of the item to grasp.
    - pick_box: tight [ymin, xmin, ymax, xmax] bounding box enclosing only the target item.
+   - grasp_p1, grasp_p2: two opposite outer edges across the item's narrowest pinch axis.
+   - estimated_height_mm: approximate physical height in millimeters above the mat.
+   - cup_point: center of the open top rim of the target cup.
+Keep spoken_reply concise and friendly (1 short sentence)."""
+
+_PLAN_PROMPT_TOY = """You are the vision and spatial planner for a general tabletop mini-manipulator (SO-101 arm with compliant ~5 cm TPU jaws).
+MODE: TOY / FREE-PICK MODE (any small, lightweight, dry tabletop object into the cup).
+Given an overhead camera image of the workspace and a user's request:
+1. Check whether a target cup AND the requested small tabletop object(s) are clearly visible.
+2. SAFETY CHECK: Refuse (feasible=false, actions=[]) if the item appears clearly too wide for a ~5 cm gripper, heavy/dense metal, liquid-filled, sharp, or hazardous.
+3. Map each object to an item_type grip profile:
+   - 'marshmallow' for soft, squishy, foam, plush, or delicate items
+   - 'sugar_cube' for small crisp cubes
+   - 'rigid_object' for solid/rigid items (Lego bricks, wooden blocks, erasers, dice, coins, pens, bottle caps, small toys)
+4. Otherwise set feasible=true and output one action per requested item using normalized [y, x] coordinates on a 0..1000 scale (top-left is [0, 0], bottom-right is [1000, 1000]):
+   - pick_point: exact center of mass / grasp center of the object.
+   - pick_box: tight [ymin, xmin, ymax, xmax] bounding box enclosing only the target object.
+   - grasp_p1, grasp_p2: two opposite outer edges across the object's narrowest pinch axis (so the gripper rotates its wrist to pinch the narrow side of rectangular objects).
+   - estimated_height_mm: approximate physical height in millimeters above the mat (e.g. 2 for coin, 10 for Lego brick, 25 for tall block).
    - cup_point: center of the open top rim of the target cup.
 Keep spoken_reply concise and friendly (1 short sentence)."""
 
@@ -141,8 +176,14 @@ class GeminiHydrogenBrain:
             raise ValueError(f"Unsupported thinking_level '{level}'. Expected one of {list(mapping)}.")
         return mapping[key]
 
-    def plan_task(self, overhead_jpeg: bytes, request_text: str) -> PlanResponse:
+    def plan_task(
+        self,
+        overhead_jpeg: bytes,
+        request_text: str,
+        mode: Literal["cocoa", "toy"] = "cocoa",
+    ) -> PlanResponse:
         """Analyze one stationary overhead frame + text request and return a structured plan."""
+        system_prompt = _PLAN_PROMPT_TOY if mode == "toy" else _PLAN_PROMPT_COCOA
         response = self.client.models.generate_content(
             model=self.model,
             contents=[
@@ -150,7 +191,7 @@ class GeminiHydrogenBrain:
                 f"User request: {request_text}",
             ],
             config=types.GenerateContentConfig(
-                system_instruction=_PLAN_SYSTEM_PROMPT,
+                system_instruction=system_prompt,
                 thinking_config=types.ThinkingConfig(thinking_level=self.thinking_level),
                 response_mime_type="application/json",
                 response_schema=PlanResponse,

@@ -157,6 +157,40 @@ def compute_close_pct_for_width(
     return max(0.0, min(open_pct - 5.0, round(pct, 1)))
 
 
+def compute_wrist_roll_deg(
+    pinch_axis_world_rad: float,
+    pick_xy: tuple[float, float],
+    kin_cfg: dict[str, Any],
+    toy_cfg: dict[str, Any],
+) -> float:
+    """Compute 180-deg symmetric wrist_roll_deg aligning jaws across pinch_axis_world_rad.
+
+    Folds the servo target angle cleanly into `wrist_roll_window_deg` (default [-40, 140))
+    so servo ID 5 avoids wrap/limit boundaries while still grabbing parallel objects cleanly.
+    """
+    pan_rad = math.atan2(pick_xy[1], pick_xy[0])
+    rel_ccw_deg = math.degrees(pinch_axis_world_rad - pan_rad)
+    zero_axis = str(toy_cfg.get("wrist_zero_pinch_axis", "y")).strip().lower()
+    if zero_axis == "y":
+        rel_ccw_deg -= 90.0
+
+    # Solve raw CW convention used by SO101Kinematics, then fold target servo deg mod 180
+    sign = float(kin_cfg.get("joint_signs", {}).get("wrist_roll", 1.0))
+    offset = float(kin_cfg.get("joint_offsets_deg", {}).get("wrist_roll", 0.0))
+    raw_cw_deg = -rel_ccw_deg
+    target_deg = sign * raw_cw_deg + offset
+
+    win = toy_cfg.get("wrist_roll_window_deg", [-40.0, 140.0])
+    lo, hi = float(win[0]), float(win[1])
+    while target_deg < lo:
+        target_deg += 180.0
+    while target_deg >= hi:
+        target_deg -= 180.0
+
+    # Convert safe target_deg back into raw wrist_roll_deg input for solve_topdown_ik
+    return round((target_deg - offset) / sign, 2)
+
+
 def build_cup_safe_waypoints(
     ik: SO101Kinematics,
     pick_xyz: tuple[float, float, float],
@@ -165,6 +199,8 @@ def build_cup_safe_waypoints(
     workspace_cfg: dict[str, Any],
     home_pose_deg: dict[str, float],
     close_pct_override: float | None = None,
+    open_pct_override: float | None = None,
+    wrist_roll_deg: float = 0.0,
 ) -> list[Waypoint]:
     """Build a collision-safe pick-and-drop sequence that clears the cup rim."""
     px, py, pz = pick_xyz
@@ -180,16 +216,16 @@ def build_cup_safe_waypoints(
         )
 
     profiles = workspace_cfg["gripper_profiles"]
-    open_pct = float(profiles["open_pct"])
+    open_pct = float(profiles["open_pct"]) if open_pct_override is None else float(open_pct_override)
     close_pct = float(profiles[item_type]["close_pct"]) if close_pct_override is None else float(close_pct_override)
 
-    pre_grasp = ik.solve_topdown_ik(px, py, pz + pre_offset, gripper_pct=open_pct)
-    descend = ik.solve_topdown_ik(px, py, pz, gripper_pct=open_pct)
-    grasp = ik.solve_topdown_ik(px, py, pz, gripper_pct=close_pct)
+    pre_grasp = ik.solve_topdown_ik(px, py, pz + pre_offset, gripper_pct=open_pct, wrist_roll_deg=wrist_roll_deg)
+    descend = ik.solve_topdown_ik(px, py, pz, gripper_pct=open_pct, wrist_roll_deg=wrist_roll_deg)
+    grasp = ik.solve_topdown_ik(px, py, pz, gripper_pct=close_pct, wrist_roll_deg=wrist_roll_deg)
 
     lift_waypoints: list[Waypoint] = []
     try:
-        lift_pick = ik.solve_topdown_ik(px, py, transit_z, gripper_pct=close_pct)
+        lift_pick = ik.solve_topdown_ik(px, py, transit_z, gripper_pct=close_pct, wrist_roll_deg=wrist_roll_deg)
     except ValueError:
         dz_t = transit_z + ik.wrist_to_tip_m - ik.base_height_m
         span = ik.upper_arm_m + ik.forearm_m - 0.002
@@ -202,18 +238,20 @@ def build_cup_safe_waypoints(
         lift_waypoints.append(
             Waypoint(
                 "LIFT_VERTICAL",
-                ik.solve_topdown_ik(px, py, pz + pre_offset, gripper_pct=close_pct),
+                ik.solve_topdown_ik(px, py, pz + pre_offset, gripper_pct=close_pct, wrist_roll_deg=wrist_roll_deg),
                 duration_s=0.8,
             )
         )
         scale = r_transit_max / pick_r
-        lift_pick = ik.solve_topdown_ik(px * scale, py * scale, transit_z, gripper_pct=close_pct)
+        lift_pick = ik.solve_topdown_ik(
+            px * scale, py * scale, transit_z, gripper_pct=close_pct, wrist_roll_deg=wrist_roll_deg
+        )
     lift_waypoints.append(Waypoint("LIFT_CLEAR", lift_pick, duration_s=1.0))
 
-    transit_cup = ik.solve_topdown_ik(cx, cy, transit_z, gripper_pct=close_pct)
-    descend_drop = ik.solve_topdown_ik(cx, cy, cup_drop_z, gripper_pct=close_pct)
-    release = ik.solve_topdown_ik(cx, cy, cup_drop_z, gripper_pct=open_pct)
-    retract_cup = ik.solve_topdown_ik(cx, cy, transit_z, gripper_pct=open_pct)
+    transit_cup = ik.solve_topdown_ik(cx, cy, transit_z, gripper_pct=close_pct, wrist_roll_deg=wrist_roll_deg)
+    descend_drop = ik.solve_topdown_ik(cx, cy, cup_drop_z, gripper_pct=close_pct, wrist_roll_deg=wrist_roll_deg)
+    release = ik.solve_topdown_ik(cx, cy, cup_drop_z, gripper_pct=open_pct, wrist_roll_deg=wrist_roll_deg)
+    retract_cup = ik.solve_topdown_ik(cx, cy, transit_z, gripper_pct=open_pct, wrist_roll_deg=0.0)
 
     return [
         Waypoint("PRE_GRASP", pre_grasp),

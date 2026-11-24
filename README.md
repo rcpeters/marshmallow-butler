@@ -18,9 +18,9 @@ A fun robotics project built to turn a desktop robot arm into a **Hot Cocoa Mars
 ## How Marshmallow Delivery Works
 
 1. **"Can I get a marshmallow in my cocoa?"** — The local **Gemma** gatekeeper decides whether it's an actual cocoa request (ignoring kids yelling about everything else in the room).
-2. **Spot & Measure (Cloud):** One overhead webcam snapshot goes on-demand to **Gemini 4 Hydrogen**, which locates the marshmallow (`pick_point` + `pick_box` width estimate) and the target mug (`cup_point`).
-3. **Pick & Plop (Edge):** Using 4-corner ArUco homography + camera height parallax correction, the **Arduino VENTUNO Q** plans a cup-safe trajectory for the **SO-101**—closing TPU jaws proportionally to the item width, lifting high over the mug rim, releasing the marshmallow, and folding neatly home.
-4. **Did It Land?** **Gemini 4 Hydrogen** takes one quick look after the arm folds away to verify the marshmallow made it into the cup.
+2. **Spot & Measure (Cloud):** One overhead webcam snapshot goes on-demand to **Gemini 4 Hydrogen**, which checks safety (`cocoa` mode for food treats only, or `--toy-mode` for general small tabletop objects with narrow-axis wrist roll + height estimation) and targets the cup.
+3. **Pick & Plop (Edge):** Using 4-corner ArUco homography + camera height parallax correction, the **Arduino VENTUNO Q** plans a cup-safe trajectory for the **SO-101**—closing TPU jaws proportionally to item width, lifting high over the mug rim, releasing cleanly, and folding neatly home.
+4. **Did It Land?** **Gemini 4 Hydrogen** takes one quick look after the arm folds away to verify the drop landed in the cup.
 
 ---
 
@@ -42,4 +42,7 @@ docker compose run --rm robot-tools pytest -v
 docker compose run --rm robot-tools python3 scripts/calibrate_arm.py
 docker compose run --rm robot-tools python3 scripts/calibrate_mat.py
 docker compose run --rm robot-tools python3 -m src.main --mode cli
+
+# Optional: launch directly in Toy Mode for general small objects (or type 'toy mode' / 'cocoa mode' at the prompt):
+docker compose run --rm robot-tools python3 -m src.main --mode cli --toy-mode
 ```

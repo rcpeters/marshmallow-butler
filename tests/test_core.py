@@ -17,13 +17,16 @@ from src.skills.calibration import (
     MatCalibration,
     align_corner_markers_from_measured,
     estimate_box_dimensions_m,
+    estimate_grasp_span_and_angle_rad,
     pick_point_to_base_xyz,
+    resolve_toy_pick_heights,
     solve_homography_from_points,
 )
 from src.skills.ik_controller import (
     SO101Kinematics,
     build_cup_safe_waypoints,
     compute_close_pct_for_width,
+    compute_wrist_roll_deg,
 )
 from src.voice.gatekeeper import parse_gatekeeper_json
 
@@ -346,6 +349,9 @@ def test_pick_box_width_estimation_and_adaptive_close_pct() -> None:
         item_type="rigid_object",
         pick_point=[500, 500],
         pick_box=[480, 490, 520, 510],
+        grasp_p1=[500, 490],
+        grasp_p2=[500, 510],
+        estimated_height_mm=12,
         cup_point=[300, 700],
     )
     assert action.pick_box == [480, 490, 520, 510]
@@ -355,6 +361,9 @@ def test_pick_box_width_estimation_and_adaptive_close_pct() -> None:
             item_type="marshmallow",
             pick_point=[500, 500],
             pick_box=[600, 490, 520, 510],
+            grasp_p1=[500, 490],
+            grasp_p2=[500, 510],
+            estimated_height_mm=15,
             cup_point=[300, 700],
         )
 
@@ -369,6 +378,10 @@ def test_pick_box_width_estimation_and_adaptive_close_pct() -> None:
     width_m, length_m = estimate_box_dimensions_m(cal, action.pick_box, z_visual_m=0.0)
     assert width_m == pytest.approx(0.020)
     assert length_m == pytest.approx(0.040)
+
+    grasp_w, grasp_ang = estimate_grasp_span_and_angle_rad(cal, action.grasp_p1, action.grasp_p2, z_visual_m=0.0)
+    assert grasp_w == pytest.approx(0.020)
+    assert grasp_ang == pytest.approx(0.0)
 
     profiles = {
         "open_pct": 75.0,
@@ -397,5 +410,35 @@ def test_pick_box_width_estimation_and_adaptive_close_pct() -> None:
             "gripper": 70.0,
         },
         close_pct_override=34.5,
+        wrist_roll_deg=25.0,
     )
     assert wps[2].joints_deg["gripper"] == pytest.approx(34.5)
+    assert wps[2].joints_deg["wrist_roll"] == pytest.approx(25.0)
+    assert wps[-2].joints_deg["wrist_roll"] == pytest.approx(0.0)
+
+
+def test_toy_mode_heights_roll_window_and_gatekeeper_switch() -> None:
+    zv_coin, zp_coin = resolve_toy_pick_heights(2, {"tip_grab_offset_m": 0.004, "max_pick_z_m": 0.025}, min_z_m=-0.003)
+    assert zv_coin == pytest.approx(0.004)
+    assert zp_coin == pytest.approx(0.0)
+
+    zv_block, zp_block = resolve_toy_pick_heights(30, {"tip_grab_offset_m": 0.004, "max_pick_z_m": 0.025}, min_z_m=-0.003)
+    assert zv_block == pytest.approx(0.021)
+    assert zp_block == pytest.approx(0.008)
+
+    kin_cfg = {
+        "joint_signs": {"wrist_roll": -1.0},
+        "joint_offsets_deg": {"wrist_roll": 0.0},
+    }
+    toy_cfg = {"wrist_zero_pinch_axis": "y", "wrist_roll_window_deg": [-40.0, 140.0]}
+    for deg_in in range(-180, 180, 15):
+        raw_roll = compute_wrist_roll_deg(np.radians(deg_in), (0.20, 0.0), kin_cfg, toy_cfg)
+        servo_deg = -1.0 * raw_roll
+        assert -40.0 <= servo_deg <= 140.0
+
+    switch_decision = parse_gatekeeper_json(
+        '{"dispatch": false, "mode_switch": "toy", "reply": "Toy mode ready!", "request_text": ""}'
+    )
+    assert switch_decision.dispatch is False
+    assert switch_decision.mode_switch == "toy"
+    assert switch_decision.reply == "Toy mode ready!"
