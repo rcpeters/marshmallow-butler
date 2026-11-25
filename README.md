@@ -1,48 +1,47 @@
-# Marshmallow Butler ☕🤖
+# Mr. S More — Marshmallow Butler ☕🤖
 
-A fun robotics project built to turn a desktop robot arm into a **Hot Cocoa Marshmallow Butler** for kids—ask for a marshmallow, and the robot spots one on the table, picks it up gently with compliant TPU fingers, clears the mug rim, drops it right into the hot cocoa, and checks its own work! Zero custom model training required.
-
-*(Cocoa-safety feature: it drops cleanly above the rim and folds neatly back out of the way—no dipped robot fingers in the chocolate!)*
+A tabletop robotics project powered by an **Arduino VENTUNO Q** and a **LeRobot SO-101** arm. Ask **Mr. S More** out loud for a marshmallow (or switch to **Toy Mode** for small desk toys), and he filters out room small talk, spots the item and cup, cracks an item-specific joke in a British butler voice while picking it up, drops it cleanly over the rim, and checks his work.
 
 ---
 
-## What's Inside (The Tech Stack)
+## How the Stack Flows
 
-- **Robot Arm:** **LeRobot SO-101** Follower arm (6-DOF Feetech STS3215 servos + soft TPU grippers for gentle marshmallow grabs)
-- **Edge Computer:** **Arduino VENTUNO Q** running a lean ARM64 Docker stack with USB webcam vision
-- **Local Voice Gatekeeper:** **Local Gemma LLM** (`gemma-4-e2b`) running on the edge to filter casual kitchen chatter and confirm real drink requests before waking the cloud
-- **Cloud Spatial Brain:** **Gemini 4 Hydrogen** (`gemini-4-hydrogen`) for on-demand single-frame vision, bounding-box object width estimation, cup targeting, and post-drop verification
+```mermaid
+flowchart LR
+    M["reSpeaker Mic"] --> W["Whisper ASR\n(Edge NPU)"]
+    W --> F{"Small-Talk Filter\n& Fast Path"}
+    F -- "Room chatter" --> I["Stay Silent"]
+    F -- "Address Mr. S More\nor Ask / Mode Switch" --> G["Gemma 4 E2B\n(Edge NPU)"]
+    F -- "'More marshmallow'\nor 'toy mode'" --> O["Robot Orchestrator"]
+    G -- "Chat / Joke" --> K["Kokoro TTS\n(British Butler)"]
+    G -- "Valid Pick" --> O
+    O -- "Ack + Item Joke" --> K --> S["USB Speaker"]
+    O -- "Overhead Photo" --> H["Gemini 4 Hydrogen\n(Cloud Vision + Plan)"]
+    H -- "3D Coordinates\n& Width / Height" --> A["SO-101 IK & Arm\n(Tactile Grip)"]
+```
+
+- **Local Edge Voice:** Whisper ASR + Gemma 4 E2B + Kokoro TTS run locally on the VENTUNO Q.
+- **Cloud Spatial Brain:** **Gemini 4 Hydrogen** (`gemini-4-hydrogen`) is called only on demand when picking or verifying.
+- **Cocoa vs. Toy Mode:** Food treats only by default; say *"switch to toy mode"* (or pass `--toy-mode`) for plushies, Legos, and small tabletop items.
 
 ---
 
-## How Marshmallow Delivery Works
-
-1. **"Can I get a marshmallow in my cocoa?"** — The local **Gemma** gatekeeper decides whether it's an actual cocoa request (ignoring kids yelling about everything else in the room).
-2. **Spot & Measure (Cloud):** One overhead webcam snapshot goes on-demand to **Gemini 4 Hydrogen**, which checks safety (`cocoa` mode for food treats only, or `--toy-mode` for general small tabletop objects with narrow-axis wrist roll + height estimation) and targets the cup.
-3. **Pick & Plop (Edge):** Using 4-corner ArUco homography + camera height parallax correction, the **Arduino VENTUNO Q** plans a cup-safe trajectory for the **SO-101**—closing TPU jaws proportionally to item width, lifting high over the mug rim, releasing cleanly, and folding neatly home.
-4. **Did It Land?** **Gemini 4 Hydrogen** takes one quick look after the arm folds away to verify the drop landed in the cup.
-
----
-
-## Requirements & Setup
-
-- **Python dependencies:** See [requirements.txt](requirements.txt)
-- **Architecture & hardware guide:** See [PLAN.md](PLAN.md)
-- **Calibration & servo diagnostics:** See [UTILITIES.md](UTILITIES.md)
-- **Hardware & workspace tuning:** See [config/hardware.yaml](config/hardware.yaml)
-
-### Quick Run (Docker on VENTUNO Q)
+## Quick Start
 
 ```bash
-cp .env.example .env   # Add your GEMINI_API_KEY and verify serial/camera device paths
+cp .env.example .env   # Add GEMINI_API_KEY and verify pinned by-id / ALSA CARD= devices
 docker compose build robot-controller
-docker compose run --rm robot-tools pytest -v
-
-# Calibrate arm & ArUco mat, then launch the CLI butler:
-docker compose run --rm robot-tools python3 scripts/calibrate_arm.py
-docker compose run --rm robot-tools python3 scripts/calibrate_mat.py
-docker compose run --rm robot-tools python3 -m src.main --mode cli
-
-# Optional: launch directly in Toy Mode for general small objects (or type 'toy mode' / 'cocoa mode' at the prompt):
-docker compose run --rm robot-tools python3 -m src.main --mode cli --toy-mode
+docker compose up -d llamacpp-models-runner audio-analytics-runner kokoro-tts
+docker compose run --rm robot-tools python3 -m src.main --mode voice
 ```
+
+Use `--toy-mode` to start in Toy Mode, `--no-verify` to skip the post-drop check, or `--mode cli` for typed commands.
+
+---
+
+## Deep Docs & Guides
+
+- **[PLAN.md](PLAN.md):** Detailed system architecture, full container/hardware flowchart, schemas, and phased setup
+- **[UTILITIES.md](UTILITIES.md):** Servo/arm calibration, gripper tactile tuning, ArUco mat alignment, and device pinning
+- **[config/hardware.yaml](config/hardware.yaml):** Link geometry, home pose, gripper profiles, and voice/ALSA settings
+- **[requirements.txt](requirements.txt):** Python runtime and test dependencies

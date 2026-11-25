@@ -13,7 +13,7 @@ from src.brain.gemini_hydrogen import GeminiHydrogenBrain
 from src.config import load_hardware_config
 from src.hardware.arm import SafeSO101Arm
 from src.hardware.cameras import DualCameraRig
-from src.main import annotate_action_overlay, compute_action_targets
+from src.skills.pick_planner import annotate_action_overlay, compute_action_targets
 from src.skills.calibration import MatCalibration, detect_aruco_centers
 from src.skills.ik_controller import SO101Kinematics
 

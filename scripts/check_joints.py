@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.config import load_hardware_config
+from src.config import load_hardware_config, update_yaml_numeric_keys
 from src.hardware.arm import SafeSO101Arm
 from src.hardware.feetech_bus import (
     DEFAULT_SO101_MOTOR_IDS,
@@ -104,38 +104,7 @@ def _run_live(bus: FeetechArmBus, cal: ArmCalibration, hz: float = 10.0) -> None
 
 def _update_home_pose_in_yaml(config_path: str | Path, home_deg: dict[str, float]) -> bool:
     """Update `arm.home_pose_deg` entries in-place while preserving comments."""
-    path = Path(config_path)
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    in_arm = False
-    in_home = False
-    updated = 0
-    new_lines: list[str] = []
-
-    for line in lines:
-        stripped = line.strip()
-        if not stripped.startswith("#"):
-            if re.match(r"^arm:\s*$", line):
-                in_arm = True
-            elif in_arm and re.match(r"^\S", line):
-                in_arm = False
-                in_home = False
-            elif in_arm and re.match(r"^\s+home_pose_deg:\s*$", line):
-                in_home = True
-            elif in_home:
-                m = re.match(r"^(\s+)([A-Za-z_]+):\s*[-+0-9.eE]+(.*)$", line.rstrip("\r\n"))
-                if m and m.group(2) in home_deg:
-                    indent, joint_name, suffix = m.group(1), m.group(2), m.group(3)
-                    eol = "\r\n" if line.endswith("\r\n") else "\n"
-                    line = f"{indent}{joint_name}: {home_deg[joint_name]:.1f}{suffix}{eol}"
-                    updated += 1
-                elif re.match(r"^\s{0,2}\S", line):
-                    in_home = False
-        new_lines.append(line)
-
-    if updated != len(home_deg):
-        return False
-    path.write_text("".join(new_lines), encoding="utf-8")
-    return True
+    return update_yaml_numeric_keys(config_path, home_deg, decimals=1, section_header="home_pose_deg")
 
 
 def _run_capture_home(bus: FeetechArmBus, cal: ArmCalibration, config_path: str) -> None:
@@ -180,25 +149,11 @@ def fit_gripper_width_range(
 
 def _update_jaw_widths_in_yaml(config_path: str | Path, min_w_m: float, max_w_m: float) -> bool:
     """Update min_jaw_width_m and max_jaw_width_m in config/hardware.yaml preserving comments."""
-    path = Path(config_path)
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    updated = 0
-    new_lines: list[str] = []
-    repl = {"min_jaw_width_m": min_w_m, "max_jaw_width_m": max_w_m}
-
-    for line in lines:
-        m = re.match(r"^(\s+)(min_jaw_width_m|max_jaw_width_m):\s*[-+0-9.eE]+(.*)$", line.rstrip("\r\n"))
-        if m and not line.lstrip().startswith("#"):
-            indent, key, suffix = m.group(1), m.group(2), m.group(3)
-            eol = "\r\n" if line.endswith("\r\n") else "\n"
-            line = f"{indent}{key}: {repl[key]:.4f}{suffix}{eol}"
-            updated += 1
-        new_lines.append(line)
-
-    if updated != 2:
-        return False
-    path.write_text("".join(new_lines), encoding="utf-8")
-    return True
+    return update_yaml_numeric_keys(
+        config_path,
+        {"min_jaw_width_m": min_w_m, "max_jaw_width_m": max_w_m},
+        decimals=4,
+    )
 
 
 def _run_calibrate_gripper(

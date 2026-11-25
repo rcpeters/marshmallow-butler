@@ -19,12 +19,13 @@ Run all utilities from the repo root on your VENTUNO Q using the `robot-tools` c
 | **Live Angle Monitor** | `docker compose run --rm robot-tools python3 scripts/check_joints.py --live` | Stream live joint angles (`deg`/`%`) and raw ticks while moving by hand |
 | **Capture Folded Home** | `docker compose run --rm robot-tools python3 scripts/check_joints.py --capture-home` | Record your arm's resting folded pose into `arm.home_pose_deg` |
 | **Calibrate Gripper Width** | `docker compose run --rm robot-tools python3 scripts/check_joints.py --calibrate-gripper` | Fit `min_jaw_width_m` & `max_jaw_width_m` from 2 cm and 5 cm jaw readings |
-| **Test Contact Grip** | `docker compose run --rm robot-tools python3 scripts/check_joints.py --test-grip` | Test STS3215 load/current contact detection safely on the bench |
+| **Test Contact Grip** | `docker compose run --rm robot-tools python3 scripts/check_joints.py --test-grip [--threshold 260 --delta 55]` | Test STS3215 load/current contact detection safely on the bench (`--threshold`/`--delta` tune rigid vs. plush stops) |
 | **Servo Flip Wizard** | `docker compose run --rm robot-tools python3 scripts/check_joints.py --check-signs` | Detect `+1.0` vs `-1.0` polarity for each joint and print `joint_signs` YAML |
 | **Mat Calibration (Camera)** | `docker compose run --rm robot-tools python3 scripts/calibrate_mat.py` | Detect ArUco markers `1–4` and save pixel-to-base homography |
 | **Mat Verify & Calibrate (Arm)** | `docker compose run --rm robot-tools python3 scripts/calibrate_mat.py --arm-calibrate` | Move/jog arm over reachable markers to align & calibrate the mat |
 | **Verify Single Marker** | `docker compose run --rm robot-tools python3 scripts/calibrate_mat.py --verify-marker 1` | Move closed gripper tip over marker `1` to verify alignment |
-| **Gemini Pre-Grasp Test** | `docker compose run --rm robot-tools python3 scripts/test_gemini_point.py --move-pregrasp` | Point with `gemini-4-hydrogen` and hover 5 cm above target item |
+| **Gemini Pre-Grasp Test** | `docker compose run --rm robot-tools python3 scripts/test_gemini_point.py --move-pregrasp [--toy-mode]` | Point with `gemini-4-hydrogen` and hover 5 cm above target item |
+| **Voice Stack Startup & Run** | `docker compose up -d llamacpp-models-runner audio-analytics-runner kokoro-tts && docker compose run --rm robot-tools python3 -m src.main --mode voice` | Start local Gemma, Whisper ASR, and Kokoro (`bm_george`) and run Mr. S More (`--stdin`, `--wake-word`, `--toy-mode`, `--dry-run`) |
 
 ---
 
@@ -96,3 +97,15 @@ Once all 6 joints pass `check_joints.py` (`[OK]` margins + verified `joint_signs
 1. Run `python3 scripts/calibrate_arm.py` starting from the **straight upright flagpole pose**.
 2. Verify `kinematics` link lengths (`base_height_m`, `upper_arm_m`, `forearm_m`, `wrist_to_tip_m`) in [config/hardware.yaml](file:///c:/Users/info/Documents/git/so101-ventuno-q/config/hardware.yaml) match ruler measurements on your arm.
 3. Run `python3 scripts/test_gemini_point.py --move-pregrasp` to confirm a clean **5 cm** hover above the target before descending to grasp.
+
+---
+
+## 5. Audio, Camera & Serial Persistence (Reboot-Safe)
+
+Linux `/dev/ttyACM*`, `/dev/video*`, and ALSA card indices can renumber across reboots. Pin `.env` using persistent identifiers instead of raw numbers:
+- **Serial arm:** `/dev/serial/by-id/...` (list with `ls -l /dev/serial/by-id/`)
+- **Cameras:** `/dev/v4l/by-id/...` (list with `ls -l /dev/v4l/by-id/`)
+- **ALSA mic & speaker:** use card ID names (e.g. `plughw:CARD=Array,DEV=0` for reSpeaker capture and `plughw:CARD=Device,DEV=0` for the USB speaker; list with `arecord -l && aplay -l`)
+
+For gripper tuning on new objects:
+- Use `--test-grip --threshold 260 --delta 55` (or `delta=40`, `cap=250` for soft plushies) to inspect `load`, `mA`, and `lag` steps before adjusting `workspace.gripper_profiles.contact_detection` (and `toy_soft_profile`) in [config/hardware.yaml](file:///c:/Users/info/Documents/git/so101-ventuno-q/config/hardware.yaml).

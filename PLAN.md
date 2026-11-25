@@ -1,28 +1,28 @@
 # SO-101 + Arduino VENTUNO Q + Gemini Robotics — Project Plan & Setup Guide
 
-> **Status:** Milestone 1 Spec Locked — Zero-Shot Voice Drink Add-In Assistant  
-> **Primary Goal:** Let people ask the robot out loud for a **sugar cube** or **marshmallow** and have the **SO-101** pick it up and drop it into a **cup — with zero training**.  
-> **Hardware:** Arduino VENTUNO Q + SO-101 Leader & Follower Arms + 2× USB Webcams + USB Mic & Speaker (or Speakerphone)  
-> **AI Stack:** **Local Edge Voice Front-End** (Standard `docker-compose.yml` reusing App Lab's NPU-optimized KWS, Whisper ASR, **Gemma** gatekeeper, & Kokoro/Piper TTS containers/models) -> **Milestone 1 Cloud Spatial Brain** (**Gemini 4 Hydrogen**, `gemini-4-hydrogen`, + Antigravity Robotics Plugin / SO-101 IK) | **Milestone 2 (Optional Hybrid Upgrade):** Local LeRobot VLA on the VENTUNO Q's 40-TOPS Hexagon NPU (or swap-in **Gemini Robotics 2.5** if partner access opens).
+> **Status:** Milestone 1 Implemented & Verified on Hardware — **Mr. S More** (Cocoa Butler + Toy Mode)  
+> **Primary Goal:** Let people ask **Mr. S More** out loud for a **marshmallow**, **sugar cube**, or (in Toy Mode) small tabletop object and have the **SO-101** pick it up, tell an item-specific joke while moving, and drop it into a **cup — with zero training**.  
+> **Hardware:** Arduino VENTUNO Q + SO-101 Follower (+ optional Leader) Arm + 2× USB Webcams + `reSpeaker XVF3800` Mic + USB Speaker  
+> **AI Stack:** **Local Edge Voice Front-End** (`docker-compose.yml` running NPU-optimized Whisper ASR `audio-analytics:1.0.5`, **Gemma 4 E2B** `llamacpp-npu-runner:0.13.2`, Kokoro TTS `bm_george`, & optional Edge Impulse KWS) -> **Milestone 1 Cloud Spatial Brain** (**Gemini 4 Hydrogen**, `gemini-4-hydrogen`, + SO-101 IK) | **Milestone 2 (Optional Hybrid Upgrade):** Local LeRobot VLA on the VENTUNO Q's 40-TOPS Hexagon NPU.
 
 ---
 
 ## 1. Milestone 1 — Zero-Shot Sugar Cube & Marshmallow Assistant
 
 ### User Experience Flow (Local Voice Front-End + Cloud Spatial Brain)
-1. **Always-On Listening (Edge Container):** The **Keyword Spotting** service (`arduino:keyword_spotting` container image, wake word e.g. *"Hey Barista"* or *"Hey Arduino"*) + VAD listens locally on the USB mic without hitting the cloud.
-2. **Local Transcription & Gemma Gatekeeper (Edge Containers):** Once triggered, the **Whisper ASR** container (`arduino:asr`) transcribes what was heard and passes it to the local **Gemma** container (`arduino:llm`, e.g., Gemma 4 E2B / Gemma 3 1B on the VENTUNO Q NPU):
-   - If the utterance is background chatter or incomplete, Gemma stays idle (or asks a quick clarifying question).
-   - If it hears a valid drink add-in request (e.g., *"Put two sugar cubes in my cup"* or *"Can I get a marshmallow?"*), Gemma outputs a structured request, **verbally confirms immediately** via the local **TTS** container (`arduino:tts` — Kokoro or Piper, e.g., *"Sure! Checking the table for a marshmallow and your cup."*), and fires the task to **Gemini 4 Hydrogen**.
-   - *(Mic is briefly muted/gated while TTS speaks and while servos move so the robot doesn't re-trigger itself.)*
-3. **Visual Reasoning & Planning (Cloud):** The **overhead webcam** captures the workspace and sends the image + parsed request to **Gemini 4 Hydrogen** (`gemini-4-hydrogen`, via `google-genai` / Interactions API):
-   - Checks that a **cup** and the requested **sugar cube / marshmallow** are visible (if not, local TTS speaks the explanation aloud, e.g., *"I don't see a cup on the mat yet"* or *"Looks like we're out of marshmallows"*).
-   - Plans the manipulation sequence, localizes the **target item** and **cup opening**, and dispatches the pick-and-drop action with item type (`sugar_cube` or `marshmallow`).
-4. **Motion & Grip Execution (Edge):**
-   - The VENTUNO Q executes **collision-free motion planning** (calibrated via the overhead mat / multi-view cameras) to approach the item safely.
-   - *(Optional precision step)* The arm hovers above the item and uses the **wrist webcam** for visual servoing / fine-centering before descending.
-   - The SO-101 Follower executes a **cup-safe pick-and-drop primitive** with an item-specific grip profile (firm-gentle for sugar cubes, extra-soft for marshmallows), clears the cup rim, releases, and returns home.
-5. **Verification & Spoken Wrap-Up:** A post-drop camera check lets Gemini 4 Hydrogen confirm success (retrying once if an item slipped), and local TTS gives a brief confirmation (*"All set — enjoy your drink!"*).
+1. **Startup & Always-On Listening (Edge Containers):** On startup, `llamacpp-models-runner` (`gemma-4-E2B_q4_0-it`) and `kokoro-tts` (`bm_george`, `en-gb`) warm up and **Mr. S More** announces himself aloud. `Whisper ASR` (`audio-analytics-runner`, `whisper-small-quantized`) streams continuously from `plughw:CARD=Array,DEV=0` (or optionally waits for `"Hey Arduino"` via `ei-keyword-spot-runner` with `--wake-word`).
+2. **Deterministic Gate + Local Gemma (`llamacpp-models-runner`):**
+   - Background small talk is ignored (`reply=""`) unless the speaker addresses **Mr. S More** (or ASR variants like `"Mr. S'more"`, `"Mr. More"`) or asks for an item/mode switch.
+   - Explicit phrases (*"More marshmallow"*, *"Mr S More marshmallow"*, *"switch to toy mode"*) match via a `<1 ms` fast path; natural sentences, jokes, and conversation route to local **Gemma 4 E2B**.
+   - On dispatch, a concise confirmation (*"Right away!"*) plays via **Kokoro TTS** (`plughw:CARD=Device,DEV=0`) **in parallel** with overhead camera capture and **Gemini 4 Hydrogen** planning. *(Mic intake stays muted with re-entrant reference counting while TTS speaks and servos move.)*
+3. **Visual Reasoning & Planning (Cloud):** The **overhead webcam** captures the workspace and sends the image + request to **Gemini 4 Hydrogen** (`gemini-4-hydrogen`, via `google-genai`):
+   - Enforces mode safety (**Cocoa Mode** for edible drink treats only; **Toy Mode** via `--toy-mode` or *"switch to toy mode"* for small tabletop items) and speaks aloud if the cup or item isn't visible or is too wide/out of reach.
+   - Returns structured JSON (`PlanResponse`): `item_type` (`sugar_cube`, `marshmallow`, `rigid_object`), `pick_point`, `pick_box`, `grasp_p1`/`grasp_p2`, `estimated_height_mm`, and `cup_point`.
+4. **Motion, Item Joke & Tactile Grip (Edge):**
+   - Using 4-marker ArUco homography + camera parallax, the VENTUNO Q computes cup-safe waypoints (including `APPROACH_CLEAR` + `LIFT_VERTICAL` + `LIFT_CLEAR` for far reaches, narrow-axis `wrist_roll`, and `3/4` height bite depth for `< 6 cm` objects).
+   - While the arm moves, a background thread generates and speaks a kid-friendly **item-specific joke** (e.g., a fox joke when grabbing a toy fox, a marshmallow joke for marshmallows).
+   - **Gripper Control:** Hard items (`rigid_object`, `sugar_cube`) and Toy Mode plushies (`toy_soft_profile`) use STS3215 load/current/stall tactile contact sensing; Cocoa Mode marshmallows use proportional width-based `close_pct`.
+5. **Verification & Spoken Wrap-Up:** A post-drop camera check lets Gemini 4 Hydrogen confirm success (unless `--no-verify` is passed), and Kokoro TTS delivers the final wrap-up.
 
 ### Physical & Workspace Design Tips (Important for Sugar Cubes & Marshmallows!)
 - **Workspace Reach Sweet Spot:** Keep the sugar cubes, marshmallows, and cup zone within a **15–28 cm radius** directly in front of the SO-101 Follower base (SO-101 max reach is ~500 mm; staying well inside ~300 mm keeps 6-DOF IK smooth and well within joint/torque limits).
@@ -64,52 +64,50 @@
 
 ```mermaid
 flowchart TB
-    USER["Person at Table\n'Put a marshmallow in my cup'"]
+    USER["Person at Table\n'Mr. S More, marshmallow please'"]
 
-    subgraph Cloud["Cloud Intelligence (Gemini API)"]
-        H4["Gemini 4 Hydrogen (gemini-4-hydrogen)\n(Scene Check, 3D/Multi-View Spatial Reasoning,\nTask Planning & Visual Verification)"]
+    subgraph Cloud["Cloud Spatial Brain (On-Demand Gemini API)"]
+        H4["Gemini 4 Hydrogen\n(Scene Check, pick_box / grasp_p1-p2,\nHeight Est. & Post-Drop Verify)"]
     end
 
-    subgraph VQ["Arduino VENTUNO Q (Docker Compose Stack — Ubuntu 24.04 Host)"]
-        subgraph VOICE["Voice Containers (App Lab ghcr.io/arduino/app-bricks Images + NPU Models)"]
-            KWS["KWS / VAD Container\n(keyword_spotting + /dev/snd)"]
-            ASR["Whisper ASR Container\n(asr + Hexagon NPU)"]
-            GEMMA["Local Gemma Container\n(llm + FastRPC NPU — Intent Gate)"]
-            TTS["Local TTS Container\n(tts — Kokoro / Piper)"]
+    subgraph VQ["Arduino VENTUNO Q (Docker Compose — ventuno-net)"]
+        subgraph VOICE["Local Edge Voice Containers"]
+            KWS["ei-keyword-spot-runner :1337\n(Optional --wake-word 'Hey Arduino')"]
+            ASR["audio-analytics-runner :8085\n(Whisper small quantized via WS /stream)"]
+            GEMMA["llamacpp-models-runner :9999\n(Gemma 4 E2B Q4_0 on Hexagon NPU)"]
+            TTS["kokoro-tts :9100\n(bm_george en-gb WAV /speak)"]
         end
-        subgraph MPU["Robotics Controller Container (Custom Python ARM64 Image)"]
-            ORCH["Python Orchestrator\n(Task State Machine, Mic Mute & Safety Clamps)"]
-            IK["Milestone 1: Zero-Shot Perception & Planning\n(Calibration + Collision-Free IK +\nVisual Servoing & Cup-Safe Primitives)"]
-            VLA["Milestone 2 (Optional): Local VLA\n(LeRobot ACT/SmolVLA on Hexagon NPU)"]
-            CAM["Dual Webcam Capture\n(OpenCV / V4L2 MJPEG via /dev/video*)"]
-            ROUTER["Arduino Router Socket\n(Bridge / MessagePack RPC)"]
-        end
-        subgraph MCU["Action Brain — STM32H5F5 (Zephyr RTOS)"]
-            SAFE["Optional Safety & UX\n(Physical E-Stop, Status LEDs, Push-to-Talk)"]
+
+        subgraph CTRL["robot-controller / robot-tools (Python 3.12 ARM64)"]
+            MIC["AlsaMicCapture\n(arecord 16kHz S16_LE)"]
+            GATE["VoiceGatekeeper\n(Small-Talk Filter, Fast Path,\nItem Jokes & Re-Entrant Mute)"]
+            ORCH["DrinkAssistantOrchestrator\n(Parallel Pre-Speak + Plan,\nConcurrent Joke Thread)"]
+            IK["Calibration & IK Planner\n(ArUco Homography + Parallax,\nWrist Roll, Far-Pick Clearances)"]
+            ARM["SafeSO101Arm + FeetechBus\n(Joint Clamps + STS3215\nLoad/Stall Contact Detection)"]
+            CAM["DualCameraRig\n(OpenCV V4L2 MJPG)"]
         end
     end
 
-    subgraph HW["Physical Layer (USB + Audio)"]
-        MIC["USB Mic"]
-        SPK["USB Speaker"]
-        CAM1["USB Webcam 1\n(Overhead Mat View)"]
-        CAM2["USB Webcam 2\n(Wrist Refinement / Verify View)"]
-        FOLLOWER["SO-101 Follower Arm\n(6× Feetech STS3215 via USB-TTL)"]
-        LEADER["SO-101 Leader Arm\n(Calibration Checks &\nOptional Milestone 2 Demos)"]
+    subgraph HW["Physical Hardware (Persistent by-id & ALSA CARD= Paths)"]
+        RESPEAKER["reSpeaker XVF3800 Mic\n(plughw:CARD=Array,DEV=0)"]
+        SPK["USB Speaker\n(plughw:CARD=Device,DEV=0)"]
+        CAM1["Overhead Webcam\n(1280x720 MJPG)"]
+        CAM2["Wrist Webcam\n(640x480 MJPG)"]
+        FOLLOWER["SO-101 Follower Arm\n(1 Mbps USB-TTL /dev/serial/by-id)"]
     end
 
-    USER --> MIC --> KWS --> ASR --> GEMMA
-    GEMMA -->|"Confirm / Missing-Item Reply"| TTS --> SPK --> USER
-    GEMMA -->|"Valid Add-In Request (Compose Network)"| ORCH
-    ORCH <-->|"google-genai / Interactions API"| H4
-    ORCH <--> IK
-    ORCH -.-> VLA
+    USER --> RESPEAKER --> MIC
+    MIC -. "if --wake-word" .-> KWS -. "trigger" .-> ASR
+    MIC --> ASR
+    ASR -- "transcript.text.done" --> GATE
+    GATE -- "small talk ignored" --> SILENT["Silent (0 ms LLM)"]
+    GATE -- "chat / jokes" --> GEMMA --> TTS
+    GATE -- "fast path or Gemma dispatch" --> ORCH
+    ORCH -- "pre-speak + item joke" --> TTS --> SPK --> USER
     CAM1 & CAM2 --> CAM --> ORCH
-    ORCH <--> ROUTER <--> SAFE
-    IK --> ORCH
-    VLA -.-> ORCH
-    ORCH <-->|"1 Mbps Serial (devices: /dev/ttyACM*)"| FOLLOWER
-    LEADER -.->|"1 Mbps Serial (Host Teleop/Record)"| ORCH
+    ORCH <-- "google-genai HTTPS" --> H4
+    ORCH --> IK --> ARM
+    ARM <-- "1 Mbps STS3215 bus" --> FOLLOWER
 ```
 
 ### Runtime Deployment Topology (100% Standalone on VENTUNO Q — No PC Needed)
@@ -154,11 +152,10 @@ With **2× USB webcams + SO-101 Follower (+ optional Leader) + USB Mic & Speaker
 - [x] Arduino VENTUNO Q
 - [x] SO-101 Leader Arm + SO-101 Follower Arm (with Feetech USB-TTL adapters & PSUs)
 - [x] 2× USB Webcams (1× Overhead/Mat view, 1× Wrist view)
-- [ ] Powered USB 3.0 Hub (4-port+ — ideally 7-port if keeping Leader, Follower, 2 cams, mic, and speaker all plugged in)
-- [ ] USB Mic + USB Speaker (or single USB conference speakerphone with echo cancellation)
-- [ ] Rigid desk clamp / baseplate + dark contrasting mat + 4 printed ArUco markers
-- [ ] Overhead camera stand/arm (~55–75 cm directly above mat) + 3D-printed wrist cam mount
-- [ ] Silicone/foam grip pads for SO-101 gripper fingers (for sugar cubes & marshmallows)
+- [x] Powered USB Hub + USB Audio (`reSpeaker XVF3800` mic + USB speaker)
+- [x] Rigid desk clamp / baseplate + contrasting mat + 4 printed ArUco markers
+- [x] Overhead camera stand + wrist cam mount
+- [x] Compliant TPU grippers on SO-101 Follower
 - [ ] Optional: Inline power switch / physical E-Stop button + M.2 2230 NVMe SSD (for Milestone 2 datasets)
 
 ---
@@ -244,39 +241,39 @@ With **2× USB webcams + SO-101 Follower (+ optional Leader) + USB Mic & Speaker
 ---
 
 ### Phase 4 — Milestone 1: Local Voice Gatekeeper + `Gemini 4 Hydrogen` Execution Loop
-1. Configure `.env` (never commit to git):
-   ```env
-   GEMINI_API_KEY=your_api_key_here
-   ```
-2. **Seed App Lab's NPU Voice Containers Once, Then Run via `docker-compose.yml`:**
-   - First, run Arduino App Lab's *"Local AI Voice Assistant"* example once on the VENTUNO Q so it pulls the `ghcr.io/arduino/app-bricks/` images, downloads the optimized Whisper/Gemma/TTS models, and writes its generated compose file (`.cache/app-compose.yaml`).
-   - Copy the `keyword_spotting`, `asr` (Whisper), `llm` (local **Gemma**, e.g., Gemma 4 E2B / Gemma 3 1B), and `tts` (Kokoro or Piper) service definitions—along with their `/dev/fastrpc-*`, `/usr/lib/dsp`, `/lib/firmware`, and model volume mounts—into this repo's `docker-compose.yml`.
-   - Add our `robot-controller` container (passing `/dev/video*` and the SO-101 serial adapter via `devices:` and `GEMINI_API_KEY` via `.env`) on the same Docker Compose network.
-   - Configure **Gemma's system prompt** as a strict gatekeeper/router returning short JSON:
-     - If what Whisper heard is unrelated chatter or unintelligible -> `{"dispatch": false, "reply": ""}` (stays quiet and returns to listening).
-     - If it's a valid request (e.g., *"one marshmallow in the cup"* or *"two sugar cubes"*) -> `{"dispatch": true, "reply": "Got it! Let me grab a marshmallow for your cup.", "request_text": "put one marshmallow in the cup"}`.
-   - Play `reply` immediately via the local TTS container while `robot-controller` dispatches `request_text` + webcam frame asynchronously to **Gemini 4 Hydrogen** (`google-genai`) and drives the SO-101 directly.
-   - **Anti-Loop Gate:** Suppress KWS/ASR listening while TTS is speaking and while the SO-101 servos are actively moving.
+1. Configure `.env` (never commit to git), including `GEMINI_API_KEY` plus persistent `/dev/serial/by-id/...`, `/dev/v4l/by-id/...`, and ALSA `plughw:CARD=...,DEV=0` devices.
+2. **Start the Pre-Wired Voice Stack (`docker-compose.yml`):**
+   - `docker-compose.yml` already includes the VENTUNO Q NPU/audio services (`llamacpp-models-runner` serving `gemma-4-E2B_q4_0-it`, `audio-analytics-runner` serving `whisper-small-quantized`, `kokoro-tts` speaking `bm_george` `en-gb`, and optional `wakeword`-profile `ei-keyword-spot-runner`).
+   - Run Arduino App Lab's voice assistant once on a fresh board if the base images/models aren't pulled yet, then launch with:
+     ```bash
+     docker compose up -d llamacpp-models-runner audio-analytics-runner kokoro-tts
+     docker compose run --rm robot-tools python3 -m src.main --mode voice
+     ```
+   - **Mr. S More Gatekeeping & Anti-Loop Muting:** `should_evaluate_transcript` + local Gemma ignore room small talk unless addressed as **Mr. S More** or requesting an item/mode switch; `fast_match_transcript` bypasses Gemma for common triggers; `suppress_listening()` uses re-entrant depth tracking so mic intake stays muted during speech and servo motion.
 3. **Structured Gemini 4 Hydrogen (`gemini-4-hydrogen`) On-Demand Spatial Plan Contract (Called Only on Dispatch):**
-   - **Call 1 (Plan & Locate):** Capture one stationary overhead frame + `request_text` from Gemma (plus optional wrist-cam fine-centering call if needed).
-   - Set `thinking_level` to `"low"` or `"medium"` (instead of default `"high"`) and use structured JSON output (`response_schema`):
+   - **Call 1 (Plan & Locate):** Capture one stationary overhead frame + `request_text` while confirmation TTS (*"Right away!"*) runs concurrently.
+   - Set `thinking_level` to `"low"` and use structured JSON output (`PlanResponse`):
      ```json
      {
        "feasible": true,
-       "spoken_reply": "All set — dropped a marshmallow in your cup!",
+       "spoken_reply": "All set — enjoy!",
        "actions": [
          {
            "item_type": "marshmallow",
            "pick_point": [540, 312],
+           "pick_box": [510, 290, 570, 334],
+           "grasp_p1": [540, 290],
+           "grasp_p2": [540, 334],
+           "estimated_height_mm": 18,
            "cup_point": [420, 680]
          }
        ]
      }
      ```
-     *(If `feasible` is `false` — e.g., no cup visible or out of sugar cubes — speak `spoken_reply` aloud via the local TTS container. Coordinates use Gemini's normalized `[y, x]` `0–1000` range or direct 3D/tool parameters via the Antigravity Robotics plugin pipeline.)*
-4. **Cup-Safe Pick-and-Drop Sequence (per action):**
-   - `HOME` -> `PRE_GRASP` (`z = z_item + 6 cm`, gripper open) -> *(optional wrist-cam visual servoing)* -> `DESCEND` (`z = z_item`) -> `GRASP` (item-specific width & torque limit) -> `LIFT` (`z = z_transit`, above cup rim) -> `TRANSIT_OVER_CUP` (`x_cup, y_cup, z_transit`) -> `DROP` (descend slightly to `z_cup_rim + 2 cm`, open gripper) -> `RETRACT` -> `HOME`.
-5. **Visual Verification & Spoken Wrap-Up:** Capture a fresh overhead frame and ask Gemini 4 Hydrogen whether the item was successfully placed (retry once if missed/dropped on the mat), then speak the final result via the local TTS container.
+     *(If `feasible` is `false` or target coordinates fall outside safe IK reach, Mr. S More speaks the reason aloud via Kokoro TTS and keeps listening.)*
+4. **Cup-Safe Pick-and-Drop Sequence (per action, with concurrent item joke):**
+   - `(APPROACH_CLEAR if far)` -> `PRE_GRASP` -> `DESCEND_TO_ITEM` (`wrist_roll` aligned in Toy Mode, `3/4` height bite for `< 6 cm` objects) -> `GRASP` (width-based `close_pct` for Cocoa marshmallows; STS3215 load/stall tactile stop for `rigid_object`, `sugar_cube`, and Toy Mode plushies via `toy_soft_profile`) -> `(LIFT_VERTICAL if far)` -> `LIFT_CLEAR` -> `TRANSIT_OVER_CUP` -> `DESCEND_TO_CUP_DROP` -> `RELEASE` -> `RETRACT_FROM_CUP` -> `RETURN_HOME`.
+5. **Visual Verification & Spoken Wrap-Up:** Capture a fresh overhead frame and ask Gemini 4 Hydrogen whether the item landed in the cup (skip with `--no-verify` for faster consecutive servings), then speak the final result via Kokoro TTS.
 
 ---
 
@@ -297,42 +294,52 @@ Install `pip install arduino-router-bridge` (`from arduino.router_bridge import 
 
 ---
 
-## 6. Proposed Project Directory Structure
+## 6. Project Directory Structure
 
 ```text
 so101-ventuno-q/
-├── PLAN.md                   # This project plan & bring-up guide
-├── docker-compose.yml        # Voice NPU containers (seeded from App Lab) + robot-controller
-├── Dockerfile                # Lean ARM64 Python 3.12 image (feetech-servo-sdk + google-genai)
-├── .env.example              # GEMINI_API_KEY + device config template
+├── README.md                 # Project overview & quick-run commands
+├── PLAN.md                   # Architecture & phased bring-up plan
+├── UTILITIES.md              # Servo, gripper, camera & audio diagnostics guide
+├── docker-compose.yml        # Local voice NPU containers + robot-controller + robot-tools
+├── Dockerfile                # Lean ARM64 Python 3.12 image + BuildKit pip cache
+├── requirements.txt          # Python runtime & test dependencies
+├── pyproject.toml            # Pytest configuration
+├── .dockerignore
+├── .env.example              # GEMINI_API_KEY, by-id ports, ALSA CARD= & voice URL template
 ├── .gitignore
 ├── config/
-│   ├── hardware.yaml         # Serial ports, camera paths, audio devices, gripper profiles
-│   ├── arm_calibration.yaml  # Saved SO-101 Follower joint midpoints & tick bounds
-│   └── calibration.yaml      # Saved ArUco homography & camera height
+│   ├── hardware.yaml         # Serial ports, camera paths, ALSA/voice settings, gripper & IK profiles
+│   ├── arm_calibration.yaml  # Saved SO-101 Follower joint midpoints & tick bounds (generated)
+│   └── calibration.yaml      # Saved ArUco homography & camera height (generated)
 ├── src/
+│   ├── config.py             # Hardware YAML loader + comment-preserving YAML numeric updater
 │   ├── voice/
-│   │   └── gatekeeper.py     # Calls local Whisper/Gemma/TTS containers + handles mic mute lock
+│   │   ├── audio_pipeline.py # ALSA capture (`arecord`), Whisper WebSocket client & optional KWS
+│   │   ├── prompts.py        # Mr. S More prompts, small-talk guard, fast-path & joke helpers
+│   │   └── gatekeeper.py     # Gemma NPU client, Kokoro TTS playback & re-entrant mic mute lock
 │   ├── hardware/
-│   │   ├── feetech_bus.py    # Pure-Python Feetech STS3215 serial bus driver (scservo_sdk)
-│   │   ├── arm.py            # Safety-clamped SO-101 Follower controller
-│   │   ├── cameras.py        # Dual USB webcam MJPEG reader (overhead + wrist)
-│   │   └── mcu_bridge.py     # Optional STM32 Arduino Router Bridge RPC client
+│   │   ├── feetech_bus.py    # Pure-Python Feetech STS3215 serial bus driver (load/current/torque)
+│   │   ├── arm.py            # Safety-clamped SO-101 controller + close_gripper_until_contact()
+│   │   └── cameras.py        # Dual USB webcam MJPEG reader (overhead + wrist)
 │   ├── brain/
-│   │   └── gemini_hydrogen.py # Gemini 4 Hydrogen client (pointing, planning, verify)
+│   │   └── gemini_hydrogen.py # Gemini 4 Hydrogen client (Cocoa & Toy Mode planning + verification)
 │   ├── skills/
-│   │   ├── calibration.py    # ArUco homography + height-parallax 2D->3D projection
-│   │   ├── ik_controller.py  # SO-101 6-DOF IK + cup-safe pick-and-drop primitives
-│   │   └── vla_runner.py     # Milestone 2: Local ONNX/QNN (Hexagon NPU) policy runner
-│   └── main.py               # Orchestrator bridging Voice Gatekeeper -> Gemini 4 Hydrogen -> SO-101
-├── firmware/
-│   └── safety_ui/            # Optional STM32H5F5 sketch (E-Stop, LEDs, push-to-talk)
-└── scripts/
-    ├── find_port.py          # Interactive USB serial port finder
-    ├── setup_motors.py       # Assign STS3215 motor IDs (1..6) & 1 Mbps baudrate
-    ├── calibrate_arm.py      # Interactive SO-101 Follower midpoint & range calibration
-    ├── calibrate_mat.py      # Interactive ArUco mat calibration helper
-    └── test_gemini_point.py  # Smoke-test Gemini pointing & overlay points on webcam frame
+│   │   ├── calibration.py    # ArUco homography, height-parallax 2D->3D, box & height helpers
+│   │   ├── ik_controller.py  # SO-101 6-DOF IK/FK, wrist_roll, jaw width & cup-safe trajectories
+│   │   └── pick_planner.py   # Action target resolution, debug overlays & tactile profile lookup
+│   └── main.py               # Orchestrator bridging Mr. S More -> Gemini 4 Hydrogen -> SO-101
+├── scripts/
+│   ├── find_port.py          # Interactive USB serial port finder
+│   ├── setup_motors.py       # Assign STS3215 motor IDs (1..6) & 1 Mbps baudrate
+│   ├── calibrate_arm.py      # Interactive SO-101 Follower midpoint & range calibration
+│   ├── calibrate_mat.py      # Interactive ArUco & arm-aligned mat calibration helper
+│   ├── check_joints.py       # Torque-off audit, --live, --capture-home, --calibrate-gripper, --test-grip
+│   └── test_gemini_point.py  # Smoke-test Gemini pointing & overlay points on webcam frame
+└── tests/
+    ├── test_calibration_ik.py # ArUco calibration, parallax math, box/height & IK/FK tests
+    ├── test_hardware.py       # Feetech servo, gripper sizing, tactile profile & YAML tests
+    └── test_voice.py          # Mr. S More gating, Whisper/Kokoro/KWS protocols & mute tests
 ```
 
 ---
