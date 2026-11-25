@@ -148,10 +148,10 @@ voice:
   asr_ws_url: "${ASR_WS_URL:-ws://audio-analytics-runner:8085/stream}"
   asr_model: "${ASR_MODEL:-whisper-small-quantized}"
   asr_language: "${ASR_LANGUAGE:-en}"
-  asr_vad_ms: 700
+  asr_vad_ms: 450
   tts_api_url: "${TTS_API_URL:-http://kokoro-tts:9100/speak}"
   tts_voice: "${TTS_VOICE:-bm_george}"
-  tts_speed: 1.0
+  tts_speed: 1.08
   tts_lang: "${TTS_LANG:-en-gb}"
   capture_device: "${ALSA_CAPTURE_DEVICE:-plughw:CARD=Array,DEV=0}"
   playback_device: "${ALSA_PLAYBACK_DEVICE:-plughw:CARD=Device,DEV=0}"
@@ -162,4 +162,4 @@ voice:
   kws_label: "hey_arduino"
   kws_confidence: 0.80
   kws_window_s: 12.0
-  mute_padding_s: 0.6
+  mute_padding_s: 0.25

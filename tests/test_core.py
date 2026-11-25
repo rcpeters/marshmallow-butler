@@ -603,8 +603,22 @@ def test_voice_pipeline_protocols_and_gatekeeper_helpers() -> None:
         request_text="put the block in the cup",
     )
     assert handle_voice_transcript(orch, gk, "put the block in the cup") is True
-    gk.speak.assert_called_once_with("Grabbing the block!")
-    orch.handle_request.assert_called_once_with("put the block in the cup")
+    gk.speak.assert_not_called()
+    orch.handle_request.assert_called_once_with("put the block in the cup", pre_speak="Grabbing the block!")
+
+    # Fast-path bypasses Gemma for explicit marshmallow & mode-switch phrases, but leaves jokes to Gemma
+    from src.voice.gatekeeper import fast_match_transcript
+
+    fast_m = fast_match_transcript("Mr. More marshmallow, please!", mode="cocoa")
+    assert fast_m is not None
+    assert fast_m.dispatch is True
+    assert "marshmallow" in fast_m.request_text
+
+    fast_mode = fast_match_transcript("switch to toy mode", mode="cocoa")
+    assert fast_mode is not None and fast_mode.mode_switch == "toy"
+
+    assert fast_match_transcript("Hey Mr. S More, tell me a marshmallow joke", mode="cocoa") is None
+    assert fast_match_transcript("So I went to the store", mode="cocoa") is None
 
 
 def test_butler_nested_mute_joke_and_missing_item_speech() -> None:

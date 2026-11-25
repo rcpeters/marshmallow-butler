@@ -28,10 +28,10 @@ In COCOA MODE, the robot ONLY puts edible drink treats (marshmallows, sugar cube
 Given a transcript heard from the room microphone, respond ONLY with valid JSON matching:
 {{"dispatch": boolean, "mode_switch": "none" | "cocoa" | "toy", "reply": string, "request_text": string}}
 Rules:
-- Keep every non-empty `reply` short (1-2 natural spoken sentences), polite British butler tone, plain text only (NO asterisks, markdown, quotes, or stage directions).
-- If the person asks to switch modes (e.g. "switch to toy mode", "play mode", "tidy up mode"), set dispatch=false, mode_switch="toy", reply="Toy mode ready! Ask me to place any small safe object in the cup.", request_text="".
-- If they ask to put a non-food item (Lego, coin, toy, battery, etc.) in cocoa mode, set dispatch=false, mode_switch="none", give a polite British butler refusal explaining cocoa mode only serves marshmallows or drink treats and suggest saying switch to toy mode, and set request_text="".
-- If it IS a treat request—including short phrases like "Mr S More marshmallow", "Mr More marshmallow please", "More marshmallow", "another marshmallow", "put a marshmallow in my cup", or "two sugar cubes please"—set dispatch=true, mode_switch="none", write a brief British butler confirmation in reply, and put a clean pick instruction in request_text (e.g. "put a marshmallow in the cup").
+- Keep every non-empty `reply` short (1-2 natural spoken sentences for chat/jokes; ONLY 2-4 words like "Right away!" or "Certainly!" when `dispatch=true`), polite British butler tone, plain text only (NO asterisks, markdown, quotes, or stage directions).
+- If the person asks to switch modes (e.g. "switch to toy mode", "play mode", "tidy up mode"), set dispatch=false, mode_switch="toy", reply="Toy mode ready!", request_text="".
+- If they ask to put a non-food item (Lego, coin, toy, battery, etc.) in cocoa mode, set dispatch=false, mode_switch="none", give a brief polite British butler refusal explaining cocoa mode only serves drink treats and suggest switch to toy mode, and set request_text="".
+- If it IS a treat request—including short phrases like "Mr S More marshmallow", "Mr More marshmallow please", "More marshmallow", "another marshmallow", "put a marshmallow in my cup", or "two sugar cubes please"—set dispatch=true, mode_switch="none", write a 2-4 word confirmation in reply (e.g. "Right away!"), and put a compact target instruction in request_text (e.g. "marshmallow" or "two sugar cubes").
 - If the speaker explicitly addresses Mr. S More (or any name variation) for greetings, conversation, thanks, or a joke without requesting a pick action, set dispatch=false, mode_switch="none", request_text="", and reply with a charming 1-2 sentence British butler response (if they ask for a joke, always tell an actual short pun or marshmallow joke!).
 - CRITICAL: If the speaker does NOT say Mr. S More (or a name variation) AND does NOT ask for a treat or mode switch (e.g. "So I went to the store", background chatter), set dispatch=false, mode_switch="none", reply="", request_text="". Do NOT reply to background conversation."""
 
@@ -41,9 +41,9 @@ In TOY MODE, the robot can pick up any small, lightweight, dry tabletop object (
 Given a transcript heard from the room microphone, respond ONLY with valid JSON matching:
 {{"dispatch": boolean, "mode_switch": "none" | "cocoa" | "toy", "reply": string, "request_text": string}}
 Rules:
-- Keep every non-empty `reply` short (1-2 natural spoken sentences), polite British butler tone, plain text only (NO asterisks, markdown, quotes, or stage directions).
-- If the person asks to return to cocoa/drink mode (e.g. "cocoa mode", "back to hot chocolate mode"), set dispatch=false, mode_switch="cocoa", reply="Back to cocoa mode, food treats only!", request_text="".
-- If it IS a pick-and-place request—including short phrases like "Mr S More lego", "Mr More marshmallow please", "More marshmallow", "put the red lego in the cup", "clean up the block", or "grab that eraser"—set dispatch=true, mode_switch="none", write a brief British butler confirmation in reply, and put a clean pick instruction in request_text.
+- Keep every non-empty `reply` short (1-2 natural spoken sentences for chat/jokes; ONLY 2-4 words like "Right away!" when `dispatch=true`), polite British butler tone, plain text only (NO asterisks, markdown, quotes, or stage directions).
+- If the person asks to return to cocoa/drink mode (e.g. "cocoa mode", "back to hot chocolate mode"), set dispatch=false, mode_switch="cocoa", reply="Back to cocoa mode!", request_text="".
+- If it IS a pick-and-place request—including short phrases like "Mr S More lego", "Mr More marshmallow please", "More marshmallow", "put the red lego in the cup", "clean up the block", or "grab that eraser"—set dispatch=true, mode_switch="none", write a 2-4 word confirmation in reply (e.g. "Right away!"), and put a compact target instruction in request_text (e.g. "red lego" or "marshmallow").
 - If the speaker explicitly addresses Mr. S More (or any name variation) for greetings, conversation, thanks, or a joke without requesting a pick action, set dispatch=false, mode_switch="none", request_text="", and reply with a charming 1-2 sentence British butler response (if they ask for a joke, always tell an actual short pun or joke!).
 - CRITICAL: If the speaker does NOT say Mr. S More (or a name variation) AND does NOT ask for a pick or mode switch (e.g. "So I went to the store", background chatter), set dispatch=false, mode_switch="none", reply="", request_text="". Do NOT reply to background conversation."""
 
@@ -54,6 +54,82 @@ _FALLBACK_MARSHMALLOW_JOKES = (
     "Why do marshmallows always win arguments? Because they make such sweet points!",
     "What is a marshmallow's favorite sport? Roasting the competition!",
 )
+
+_TOY_MODE_TRIGGERS = {
+    "toy mode",
+    "switch to toy mode",
+    "play mode",
+    "switch to play mode",
+    "tidy up mode",
+    "mr s more toy mode",
+    "mr s more switch to toy mode",
+    "mr smore toy mode",
+    "mr smore switch to toy mode",
+    "mr more toy mode",
+    "mr more switch to toy mode",
+}
+_COCOA_MODE_TRIGGERS = {
+    "cocoa mode",
+    "switch to cocoa mode",
+    "back to cocoa mode",
+    "hot chocolate mode",
+    "back to hot chocolate mode",
+    "drink mode",
+    "mr s more cocoa mode",
+    "mr s more switch to cocoa mode",
+    "mr smore cocoa mode",
+    "mr more cocoa mode",
+}
+_MARSHMALLOW_FAST_TRIGGERS = {
+    "marshmallow",
+    "marshmallows",
+    "marshmallow please",
+    "more marshmallow",
+    "more marshmallows",
+    "more marshmallow please",
+    "another marshmallow",
+    "one marshmallow",
+    "a marshmallow",
+    "put a marshmallow in the cup",
+    "put a marshmallow in my cup",
+    "drop a marshmallow in the cup",
+    "mr s more marshmallow",
+    "mr s more marshmallow please",
+    "mr s more more marshmallow",
+    "mr s more put a marshmallow in the cup",
+    "mr smore marshmallow",
+    "mr smore marshmallow please",
+    "mr more marshmallow",
+    "mr more marshmallow please",
+    "mr s moore marshmallow",
+    "mr s moore marshmallow please",
+    "mister s more marshmallow",
+    "mister s more marshmallow please",
+    "s more marshmallow",
+    "s more marshmallow please",
+}
+
+
+def fast_match_transcript(
+    transcript: str,
+    mode: Literal["cocoa", "toy"] = "cocoa",
+) -> GatekeeperDecision | None:
+    """Zero-latency fast path for unambiguous marshmallow or mode-switch phrases."""
+    norm = " ".join(re.sub(r"[^a-z0-9\s]", " ", transcript.lower()).split())
+    if not norm:
+        return None
+    if norm in _TOY_MODE_TRIGGERS:
+        return GatekeeperDecision(dispatch=False, mode_switch="toy", reply="Toy mode ready!", request_text="")
+    if norm in _COCOA_MODE_TRIGGERS:
+        return GatekeeperDecision(dispatch=False, mode_switch="cocoa", reply="Back to cocoa mode!", request_text="")
+    if norm in _MARSHMALLOW_FAST_TRIGGERS:
+        return GatekeeperDecision(
+            dispatch=True,
+            mode_switch="none",
+            reply="Right away!",
+            request_text="put a marshmallow in the cup",
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -208,6 +284,7 @@ class VoiceGatekeeper:
                 {"role": "user", "content": text},
             ],
             "temperature": 0.25,
+            "max_tokens": 70,
             "response_format": {"type": "json_object"},
         }
         with httpx.Client(timeout=timeout_s) as client:

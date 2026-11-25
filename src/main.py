@@ -35,7 +35,7 @@ from src.skills.ik_controller import (
     compute_wrist_roll_deg,
 )
 from src.voice.audio_pipeline import WakeWordDetector, WhisperASRClient
-from src.voice.gatekeeper import VoiceGatekeeper
+from src.voice.gatekeeper import VoiceGatekeeper, fast_match_transcript
 
 logger = logging.getLogger(__name__)
 
@@ -315,16 +315,41 @@ class DrinkAssistantOrchestrator:
                 joke_thread.join(timeout=20.0)
         return True
 
-    def handle_request(self, request_text: str) -> bool:
+    def handle_request(self, request_text: str, pre_speak: str = "") -> bool:
         """Run one complete on-demand plan -> execute -> verify cycle for a request."""
-        try:
-            frame = self.cameras.capture_overhead()
-            overhead_jpeg = self.cameras.encode_jpeg(frame)
-            plan = self.brain.plan_task(overhead_jpeg, request_text, mode=self.mode)
-        except Exception as exc:
-            logger.warning("Failed to capture or plan request '%s': %s", request_text, exc)
-            self._speak("Beg pardon, I had trouble checking the tabletop camera just now.")
-            return False
+        pre_thread: threading.Thread | None = None
+        if pre_speak and self.gatekeeper is not None:
+            gk = self.gatekeeper
+
+            def _speak_ack() -> None:
+                print(f"[ROBOT] {pre_speak}")
+                gk.speak(pre_speak)
+
+            # Speak confirmation concurrently while capturing the overhead frame and planning
+            with self.gatekeeper.suppress_listening():
+                pre_thread = threading.Thread(target=_speak_ack, daemon=True, name="PreSpeakAck")
+                pre_thread.start()
+                try:
+                    frame = self.cameras.capture_overhead()
+                    overhead_jpeg = self.cameras.encode_jpeg(frame)
+                    plan = self.brain.plan_task(overhead_jpeg, request_text, mode=self.mode)
+                except Exception as exc:
+                    pre_thread.join(timeout=15.0)
+                    logger.warning("Failed to capture or plan request '%s': %s", request_text, exc)
+                    self._speak("Beg pardon, I had trouble checking the tabletop camera just now.")
+                    return False
+                pre_thread.join(timeout=15.0)
+        else:
+            if pre_speak:
+                self._speak(pre_speak)
+            try:
+                frame = self.cameras.capture_overhead()
+                overhead_jpeg = self.cameras.encode_jpeg(frame)
+                plan = self.brain.plan_task(overhead_jpeg, request_text, mode=self.mode)
+            except Exception as exc:
+                logger.warning("Failed to capture or plan request '%s': %s", request_text, exc)
+                self._speak("Beg pardon, I had trouble checking the tabletop camera just now.")
+                return False
 
         if not plan.feasible or not plan.actions:
             self._speak(
@@ -413,7 +438,11 @@ def handle_voice_transcript(
         return False
 
     logger.info("Heard transcript: %s", text)
-    decision = gatekeeper.evaluate_transcript(text, mode=orchestrator.mode)
+    decision = fast_match_transcript(text, mode=orchestrator.mode)
+    if decision is not None:
+        logger.info("Fast-matched command -> %s", decision)
+    else:
+        decision = gatekeeper.evaluate_transcript(text, mode=orchestrator.mode)
     if decision.mode_switch in ("cocoa", "toy"):
         orchestrator.mode = decision.mode_switch
         logger.info("Switched assistant mode -> %s", orchestrator.mode)
@@ -427,9 +456,7 @@ def handle_voice_transcript(
         logger.debug("Ignored non-dispatch chatter: %s", text)
         return False
 
-    if decision.reply:
-        gatekeeper.speak(decision.reply)
-    orchestrator.handle_request(decision.request_text or text)
+    orchestrator.handle_request(decision.request_text or text, pre_speak=decision.reply)
     return True
 
 

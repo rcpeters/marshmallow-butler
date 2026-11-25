@@ -12,6 +12,7 @@ from src.voice.gatekeeper import (
     GatekeeperDecision,
     VoiceGatekeeper,
     build_tts_payload,
+    fast_match_transcript,
     parse_gatekeeper_json,
 )
 
@@ -24,6 +25,7 @@ __all__ = [
     "build_asr_create_payload",
     "build_tts_payload",
     "extract_kws_match",
+    "fast_match_transcript",
     "parse_asr_ws_event",
     "parse_gatekeeper_json",
 ]
