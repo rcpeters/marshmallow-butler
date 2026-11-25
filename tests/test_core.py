@@ -703,3 +703,31 @@ def test_butler_nested_mute_joke_and_missing_item_speech() -> None:
     )
     assert orch.handle_request("put a marshmallow in the cup") is False
     mock_gk.speak.assert_called_once_with("I cannot see any marshmallow on the mat right now.")
+
+
+def test_toy_mode_soft_tactile_profile_resolution() -> None:
+    from src.main import resolve_action_contact_cfg
+
+    contact_cfg = {
+        "enabled": True,
+        "item_types": ["rigid_object", "sugar_cube"],
+        "load_threshold": 350,
+        "load_delta": 90,
+        "torque_limit": 650,
+        "squeeze_extra_pct": 7.0,
+        "toy_soft_profile": {
+            "enabled": True,
+            "load_threshold": 250,
+            "load_delta": 40,
+            "torque_limit": 550,
+            "squeeze_extra_pct": 6.0,
+        },
+    }
+    assert resolve_action_contact_cfg(contact_cfg, "marshmallow", "cocoa") is None
+    toy_soft = resolve_action_contact_cfg(contact_cfg, "marshmallow", "toy")
+    assert toy_soft is not None
+    assert toy_soft["load_delta"] == 40
+    assert toy_soft["load_threshold"] == 250
+    rigid = resolve_action_contact_cfg(contact_cfg, "rigid_object", "toy")
+    assert rigid is not None
+    assert rigid["load_delta"] == 90

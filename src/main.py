@@ -171,6 +171,24 @@ def annotate_action_overlay(
     cv2.putText(annotated, f"{idx}:cup", (int(u_cup) + 12, int(v_cup)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 2)
 
 
+def resolve_action_contact_cfg(
+    contact_cfg: dict[str, Any] | None,
+    item_type: str,
+    mode: Literal["cocoa", "toy"],
+) -> dict[str, Any] | None:
+    """Resolve STS3215 tactile contact parameters for one item_type and mode."""
+    if not contact_cfg or not contact_cfg.get("enabled", False):
+        return None
+    if mode == "toy" and item_type == "marshmallow":
+        soft_cfg = contact_cfg.get("toy_soft_profile") or {}
+        if soft_cfg.get("enabled", False):
+            return {**contact_cfg, **soft_cfg, "enabled": True}
+    apply_types = contact_cfg.get("item_types")
+    if not apply_types or item_type in apply_types:
+        return {**contact_cfg, "enabled": True}
+    return None
+
+
 class DrinkAssistantOrchestrator:
     """Executes zero-shot cocoa-treat and toy-mode tabletop pick-and-drop requests."""
 
@@ -266,7 +284,6 @@ class DrinkAssistantOrchestrator:
             cv2.imwrite(str(debug_path), annotated)
 
         contact_cfg = ws.get("gripper_profiles", {}).get("contact_detection") or {}
-        apply_types = contact_cfg.get("item_types")
         planned_trajectories = []
         for action, t in resolved_list:
             try:
@@ -310,10 +327,7 @@ class DrinkAssistantOrchestrator:
 
         try:
             for action, waypoints in planned_trajectories:
-                use_contact = bool(contact_cfg.get("enabled", False)) and (
-                    not apply_types or action.item_type in apply_types
-                )
-                action_contact = {**contact_cfg, "enabled": use_contact} if use_contact else None
+                action_contact = resolve_action_contact_cfg(contact_cfg, action.item_type, self.mode)
                 self.arm.execute_waypoints(waypoints, contact_cfg=action_contact)
         finally:
             if joke_thread is not None:

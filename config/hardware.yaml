@@ -81,11 +81,17 @@ workspace:
     # STS3215 hardware load/stall tactile grasp (test thresholds with check_joints.py --test-grip first)
     contact_detection:
       enabled: true
-      item_types: ["rigid_object", "sugar_cube"] # Tactile stop for hard items; marshmallows use close_pct
+      item_types: ["rigid_object", "sugar_cube"] # Tactile stop for hard items; Cocoa marshmallows use close_pct
       load_threshold: 350     # Hard cap (0..1000) above normal ~195 free-closing PWM load
       load_delta: 90          # Firm contact rise above baseline before clamping
       torque_limit: 650       # Closing torque limit (0..1000) for solid TPU grip
       squeeze_extra_pct: 7.0  # Press ~5-6mm deeper into compliant TPU after contact triggers
+      toy_soft_profile:       # Gentler tactile stop for plush/soft items classified as 'marshmallow' in Toy Mode
+        enabled: true
+        load_threshold: 250
+        load_delta: 40
+        torque_limit: 550
+        squeeze_extra_pct: 6.0
     sugar_cube:
       close_pct: 22.0
     marshmallow:
