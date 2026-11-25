@@ -202,7 +202,12 @@ class DrinkAssistantOrchestrator:
         if self.gatekeeper is not None:
             self.gatekeeper.speak(message)
 
-    def _execute_plan(self, plan: PlanResponse, frame: Any = None) -> bool:
+    def _execute_plan(
+        self,
+        plan: PlanResponse,
+        frame: Any = None,
+        request_text: str = "",
+    ) -> bool:
         ws = self.cfg["workspace"]
         annotated = frame.copy() if frame is not None else None
         resolved_list: list[tuple[PickDropAction, ResolvedActionTargets]] = []
@@ -286,20 +291,20 @@ class DrinkAssistantOrchestrator:
             planned_trajectories.append((action, waypoints))
 
         joke_thread: threading.Thread | None = None
-        if self.gatekeeper is not None and any(
-            action.item_type == "marshmallow" for action, _ in planned_trajectories
-        ):
+        if self.gatekeeper is not None and planned_trajectories:
             gk = self.gatekeeper
+            first_type = planned_trajectories[0][0].item_type
+            item_query = request_text or first_type
 
-            def _tell_marshmallow_joke() -> None:
-                joke = gk.generate_marshmallow_joke()
+            def _tell_item_joke() -> None:
+                joke = gk.generate_item_joke(item_query, item_type=first_type)
                 print(f"[ROBOT] {joke}")
                 gk.speak(joke)
 
             joke_thread = threading.Thread(
-                target=_tell_marshmallow_joke,
+                target=_tell_item_joke,
                 daemon=True,
-                name="MarshmallowJoke",
+                name="ItemJoke",
             )
             joke_thread.start()
 
@@ -362,9 +367,9 @@ class DrinkAssistantOrchestrator:
         for attempt in range(max_retries + 1):
             if self.gatekeeper is not None:
                 with self.gatekeeper.suppress_listening():
-                    executed = self._execute_plan(plan, frame=frame)
+                    executed = self._execute_plan(plan, frame=frame, request_text=request_text)
             else:
-                executed = self._execute_plan(plan, frame=frame)
+                executed = self._execute_plan(plan, frame=frame, request_text=request_text)
 
             if not executed:
                 return False

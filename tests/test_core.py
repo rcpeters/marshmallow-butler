@@ -620,6 +620,20 @@ def test_voice_pipeline_protocols_and_gatekeeper_helpers() -> None:
     assert fast_match_transcript("Hey Mr. S More, tell me a marshmallow joke", mode="cocoa") is None
     assert fast_match_transcript("So I went to the store", mode="cocoa") is None
 
+    from src.voice.gatekeeper import addresses_mr_smore, should_evaluate_transcript
+
+    assert addresses_mr_smore("Hey Mr. S More, how are you?") is True
+    assert addresses_mr_smore("Mr. S'more tell me a joke") is True
+    assert addresses_mr_smore("Mr More, good evening") is True
+    assert addresses_mr_smore("So anyway I went to the store") is False
+    assert addresses_mr_smore("Can I have more coffee") is False
+
+    assert should_evaluate_transcript("How is the weather today?", mode="cocoa") is False
+    assert should_evaluate_transcript("Tell me a joke", mode="cocoa") is False
+    assert should_evaluate_transcript("Hey Mr. S More, tell me a joke", mode="cocoa") is True
+    assert should_evaluate_transcript("I want a marshmallow", mode="cocoa") is True
+    assert should_evaluate_transcript("put the red lego in the cup", mode="toy") is True
+
 
 def test_butler_nested_mute_joke_and_missing_item_speech() -> None:
     from unittest.mock import MagicMock
@@ -642,9 +656,18 @@ def test_butler_nested_mute_joke_and_missing_item_speech() -> None:
         assert gk.is_muted is True
     assert gk.is_muted is False
 
-    # Offline fallback returns a non-empty marshmallow joke
-    joke = gk.generate_marshmallow_joke(timeout_s=0.1)
-    assert len(joke) > 10
+    # Offline fallback returns a joke tailored to the specific item
+    from src.voice.gatekeeper import extract_joke_subject
+
+    assert extract_joke_subject("put the fox in the cup", "rigid_object") == "fox"
+    assert extract_joke_subject("put a marshmallow in the cup", "marshmallow") == "marshmallow"
+
+    m_joke = gk.generate_marshmallow_joke(timeout_s=0.1)
+    assert len(m_joke) > 10
+
+    fox_joke = gk.generate_item_joke("put the fox in the cup", item_type="rigid_object", timeout_s=0.1)
+    assert "fox" in fox_joke.lower()
+    assert "marshmallow" not in fox_joke.lower()
 
     # Orchestrator speaks out loud when Gemini cannot see an item
     cal = MatCalibration(

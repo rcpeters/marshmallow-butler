@@ -55,6 +55,32 @@ _FALLBACK_MARSHMALLOW_JOKES = (
     "What is a marshmallow's favorite sport? Roasting the competition!",
 )
 
+_FALLBACK_OBJECT_JOKES = (
+    "Why did the {subject} hop straight into the cup? It fancied a first-class seat!",
+    "What did the {subject} say to the cup? Make room, I'm moving in!",
+    "Why is the {subject} such a polite guest? It always arrives right on cue!",
+)
+
+_JOKE_FILLER_RE = re.compile(
+    r"\b(?:please|kindly|can you|could you|would you|put|place|drop|grab|pick up|pick|"
+    r"fetch|get|give me|give|pass|move|clean up|tidy up|in the cup|into the cup|in my cup|"
+    r"into my cup|mr s more|mr smore|mr more|mister s more|a|an|the|that|this|one|another|"
+    r"for me)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def extract_joke_subject(request_text: str, item_type: str = "marshmallow") -> str:
+    """Extract a clean object phrase (e.g. 'fox', 'red lego', 'marshmallow') for joke prompts."""
+    cleaned = re.sub(r"[^a-zA-Z0-9\s-]", " ", request_text).strip()
+    cleaned = _JOKE_FILLER_RE.sub(" ", cleaned)
+    cleaned = " ".join(cleaned.split()).strip()
+    if cleaned:
+        return cleaned
+    if item_type == "rigid_object":
+        return "little toy"
+    return item_type.replace("_", " ")
+
 _TOY_MODE_TRIGGERS = {
     "toy mode",
     "switch to toy mode",
@@ -110,12 +136,75 @@ _MARSHMALLOW_FAST_TRIGGERS = {
 }
 
 
+_MR_SMORE_RE = re.compile(
+    r"\b(?:mr|mister)\s+(?:s\s+)?m+o+r+e*\b|\b(?:mr|mister)\s+s\s*more\b|\bs\s+more\b|\bsmore\b"
+)
+_COCOA_KEYWORDS = (
+    "marshmallow",
+    "sugar cube",
+    "candy",
+    "candies",
+    "treat",
+    "toy mode",
+    "play mode",
+    "tidy up mode",
+    "cocoa mode",
+    "hot chocolate mode",
+    "drink mode",
+)
+_ACTION_WORDS = {
+    "put",
+    "pick",
+    "grab",
+    "drop",
+    "place",
+    "move",
+    "clean",
+    "tidy",
+    "fetch",
+    "get",
+    "give",
+    "pass",
+}
+_TOY_WORDS = {"lego", "block", "eraser", "die", "dice", "coin", "toy", "cube", "cap", "pen"}
+
+
+def _normalize_transcript(transcript: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9\s]", " ", transcript.lower()).split())
+
+
+def addresses_mr_smore(transcript: str) -> bool:
+    """Return True if the transcript directly addresses Mr. S More (or common ASR variants)."""
+    norm = _normalize_transcript(transcript)
+    return bool(norm and _MR_SMORE_RE.search(norm))
+
+
+def should_evaluate_transcript(
+    transcript: str,
+    mode: Literal["cocoa", "toy"] = "cocoa",
+) -> bool:
+    """Pre-filter room chatter unless asking for an item/mode switch or addressing Mr. S More."""
+    norm = _normalize_transcript(transcript)
+    if not norm:
+        return False
+    if addresses_mr_smore(norm) or fast_match_transcript(norm, mode=mode) is not None:
+        return True
+    if any(kw in norm for kw in _COCOA_KEYWORDS):
+        return True
+    words = set(norm.split())
+    if mode == "toy" and ((words & _ACTION_WORDS) or (words & _TOY_WORDS)):
+        return True
+    if "cup" in words and (words & _ACTION_WORDS):
+        return True
+    return False
+
+
 def fast_match_transcript(
     transcript: str,
     mode: Literal["cocoa", "toy"] = "cocoa",
 ) -> GatekeeperDecision | None:
     """Zero-latency fast path for unambiguous marshmallow or mode-switch phrases."""
-    norm = " ".join(re.sub(r"[^a-z0-9\s]", " ", transcript.lower()).split())
+    norm = _normalize_transcript(transcript)
     if not norm:
         return None
     if norm in _TOY_MODE_TRIGGERS:
@@ -231,20 +320,37 @@ class VoiceGatekeeper:
                     if self._mute_depth == 0:
                         self._mute_event.clear()
 
-    def generate_marshmallow_joke(self, timeout_s: float = 10.0) -> str:
-        """Generate a short, spoken-ready British butler marshmallow joke (with offline fallback)."""
+    def generate_item_joke(
+        self,
+        item_name: str,
+        item_type: str = "marshmallow",
+        timeout_s: float = 10.0,
+    ) -> str:
+        """Generate a short British butler joke specifically about the item being retrieved."""
+        subject = extract_joke_subject(item_name, item_type=item_type)
+        is_marshmallow = "marshmallow" in subject.lower()
+        topic_rule = (
+            "Tell ONE short, kid-friendly marshmallow joke or pun in 1-2 spoken sentences."
+            if is_marshmallow
+            else (
+                f"Tell ONE short, kid-friendly pun or joke specifically about a '{subject}' "
+                f"in 1-2 spoken sentences. Do NOT tell a marshmallow joke unless the item is a marshmallow."
+            )
+        )
         payload = {
             "model": self.gemma_model,
             "messages": [
                 {
                     "role": "system",
                     "content": (
-                        "You are Mr. S More, a witty British butler robot. Tell ONE short, kid-friendly "
-                        "marshmallow joke or pun in 1-2 spoken sentences. Plain text only: no quotes, "
-                        "no asterisks, no parentheses or stage directions."
+                        f"You are Mr. S More, a witty British butler robot. {topic_rule} "
+                        "Plain text only: no quotes, no asterisks, no parentheses or stage directions."
                     ),
                 },
-                {"role": "user", "content": "Tell a quick marshmallow joke while serving."},
+                {
+                    "role": "user",
+                    "content": f"Tell a quick one-liner joke about {subject} while placing it in the cup.",
+                },
             ],
             "temperature": 0.7,
             "max_tokens": 80,
@@ -259,11 +365,19 @@ class VoiceGatekeeper:
             if cleaned:
                 return cleaned
         except Exception as exc:
-            logger.debug("Falling back to curated marshmallow joke (%s)", exc)
+            logger.debug("Falling back to curated joke for '%s' (%s)", subject, exc)
 
-        joke = _FALLBACK_MARSHMALLOW_JOKES[self._joke_idx % len(_FALLBACK_MARSHMALLOW_JOKES)]
+        if is_marshmallow:
+            joke = _FALLBACK_MARSHMALLOW_JOKES[self._joke_idx % len(_FALLBACK_MARSHMALLOW_JOKES)]
+        else:
+            tmpl = _FALLBACK_OBJECT_JOKES[self._joke_idx % len(_FALLBACK_OBJECT_JOKES)]
+            joke = tmpl.format(subject=subject)
         self._joke_idx += 1
         return joke
+
+    def generate_marshmallow_joke(self, timeout_s: float = 10.0) -> str:
+        """Backward-compatible wrapper returning a marshmallow joke."""
+        return self.generate_item_joke("marshmallow", item_type="marshmallow", timeout_s=timeout_s)
 
     def evaluate_transcript(
         self,
@@ -273,7 +387,7 @@ class VoiceGatekeeper:
     ) -> GatekeeperDecision:
         """Send an ASR transcript to local Gemma to filter chatter vs. actionable requests."""
         text = transcript.strip()
-        if not text:
+        if not should_evaluate_transcript(text, mode=mode):
             return GatekeeperDecision(dispatch=False, reply="", request_text="")
 
         system_prompt = _GEMMA_PROMPT_TOY if mode == "toy" else _GEMMA_PROMPT_COCOA
@@ -294,7 +408,13 @@ class VoiceGatekeeper:
                 resp = client.post(self.gemma_api_url, json=payload)
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"]
-        return parse_gatekeeper_json(content)
+        decision = parse_gatekeeper_json(content)
+        if not decision.dispatch and decision.mode_switch == "none" and not addresses_mr_smore(text):
+            low_reply = decision.reply.lower()
+            is_cocoa_refusal = mode == "cocoa" and ("cocoa mode" in low_reply or "toy mode" in low_reply)
+            if not is_cocoa_refusal:
+                return GatekeeperDecision(dispatch=False, reply="", request_text="", mode_switch="none")
+        return decision
 
     def warmup_llm(self, timeout_s: float = 60.0) -> None:
         """Best-effort warmup call so llamacpp-npu-runner loads Gemma onto HTP0 before listening."""
