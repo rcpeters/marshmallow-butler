@@ -26,7 +26,13 @@ from src.skills.ik_controller import (
     compute_open_pct_for_width,
     compute_wrist_roll_deg,
 )
-from src.voice.gatekeeper import parse_gatekeeper_json
+from src.voice.audio_pipeline import (
+    build_asr_audio_message,
+    build_asr_create_payload,
+    extract_kws_match,
+    parse_asr_ws_event,
+)
+from src.voice.gatekeeper import GatekeeperDecision, build_tts_payload, parse_gatekeeper_json
 
 
 def _sample_kin_cfg() -> dict:
@@ -335,11 +341,18 @@ def test_cup_safe_waypoints_allows_far_pick_retract() -> None:
         "gripper": 20.0,
     }
     wps = build_cup_safe_waypoints(
-        ik, (0.26, 0.0, 0.0), (0.19, -0.06, 0.088), "marshmallow", ws_cfg, home
+        ik, (0.272, 0.006, 0.0), (0.19, -0.06, 0.088), "marshmallow", ws_cfg, home
     )
     labels = [w.label for w in wps]
+    assert "APPROACH_CLEAR" in labels
     assert "LIFT_VERTICAL" in labels
     assert labels[-1] == "RETURN_HOME"
+
+    # Cup placed beyond high-transit reach returns False cleanly instead of crashing voice loop
+    with pytest.raises(ValueError, match="out of link reach"):
+        build_cup_safe_waypoints(
+            ik, (0.272, 0.006, 0.0), (0.187, 0.155, 0.088), "marshmallow", ws_cfg, home
+        )
 
 
 def test_pick_box_width_estimation_and_adaptive_close_pct() -> None:
@@ -498,3 +511,158 @@ def test_gripper_2cm_5cm_fit_snug_open_and_sts_contact() -> None:
         assert res is not None
         assert res.contact_detected is True
         assert res.final_pct == pytest.approx(12.0)
+
+
+def test_voice_pipeline_protocols_and_gatekeeper_helpers() -> None:
+    import base64
+    import json
+    from unittest.mock import MagicMock
+
+    from src.main import handle_voice_transcript
+
+    # Gatekeeper strips optional <think> blocks and parses embedded JSON
+    thought_raw = '<think>considering cocoa rules</think>\n{"dispatch": true, "mode_switch": "none", "reply": "On it!", "request_text": "put a marshmallow in the cup"}'
+    parsed = parse_gatekeeper_json(thought_raw)
+    assert parsed.dispatch is True
+    assert parsed.reply == "On it!"
+    assert parsed.request_text == "put a marshmallow in the cup"
+
+    # Kokoro /speak payload vs OpenAI /audio/speech payload
+    assert build_tts_payload("http://kokoro-tts:9100/speak", "Hello!", voice="af_heart", speed=1.1) == {
+        "text": "Hello!",
+        "voice": "af_heart",
+        "speed": 1.1,
+        "lang": "en-us",
+    }
+    assert build_tts_payload("http://local-tts:8000/v1/audio/speech", "Hello!") == {
+        "input": "Hello!",
+        "response_format": "wav",
+    }
+
+    # Whisper ASR REST + WebSocket payloads matching audio-analytics-runner 1.0.5
+    create_body = build_asr_create_payload(model="whisper-small-quantized", language="en", vad_ms=700)
+    assert create_body["model"] == "whisper-small-quantized"
+    assert create_body["stream"] is True
+    assert create_body["language"] == "en"
+    params = json.loads(create_body["parameters"])
+    assert {"key": "format", "value": "pcm_s16le"} in params
+
+    audio_msg = build_asr_audio_message("sess-1", b"\x01\x02\x03\x04")
+    assert audio_msg["message_type"] == "transcriptions_session_audio"
+    assert audio_msg["type"] == "input_audio"
+    assert base64.b64decode(audio_msg["data"]) == b"\x01\x02\x03\x04"
+
+    assert parse_asr_ws_event('{"state": "connection_established"}', "sess-1") == ("established", "")
+    assert parse_asr_ws_event('{"session_id": "other", "type": "transcript.text.done", "text": "hi"}', "sess-1") is None
+    assert parse_asr_ws_event('{"session_id": "sess-1", "type": "transcript.text.done", "text": "  put a marshmallow in "} ', "sess-1") == (
+        "done",
+        "put a marshmallow in",
+    )
+
+    # Edge Impulse KWS extraction
+    kws_res = {"result": {"classification": {"Hey Arduino": 0.91, "noise": 0.09}}}
+    assert extract_kws_match(kws_res, "hey_arduino", 0.80) == ("Hey Arduino", pytest.approx(0.91))
+    assert extract_kws_match(kws_res, "hey_arduino", 0.95) is None
+
+    # Transcript handler dispatches and switches modes while ignoring muted input
+    orch = MagicMock()
+    orch.mode = "cocoa"
+    gk = MagicMock()
+    gk.is_muted = True
+    assert handle_voice_transcript(orch, gk, "put a lego in") is False
+    gk.evaluate_transcript.assert_not_called()
+
+    gk.is_muted = False
+    gk.evaluate_transcript.return_value = GatekeeperDecision(
+        dispatch=False,
+        mode_switch="toy",
+        reply="Toy mode ready!",
+        request_text="",
+    )
+    assert handle_voice_transcript(orch, gk, "switch to toy mode") is True
+    assert orch.mode == "toy"
+    gk.speak.assert_called_once_with("Toy mode ready!")
+    orch.handle_request.assert_not_called()
+
+    gk.speak.reset_mock()
+    gk.evaluate_transcript.return_value = GatekeeperDecision(
+        dispatch=False,
+        mode_switch="none",
+        reply="Why did the marshmallow cross the road? To get toasted on the other side!",
+        request_text="",
+    )
+    assert handle_voice_transcript(orch, gk, "Hey Mr. S More, tell me a marshmallow joke") is False
+    gk.speak.assert_called_once()
+    orch.handle_request.assert_not_called()
+
+    gk.speak.reset_mock()
+    gk.evaluate_transcript.return_value = GatekeeperDecision(
+        dispatch=True,
+        mode_switch="none",
+        reply="Grabbing the block!",
+        request_text="put the block in the cup",
+    )
+    assert handle_voice_transcript(orch, gk, "put the block in the cup") is True
+    gk.speak.assert_called_once_with("Grabbing the block!")
+    orch.handle_request.assert_called_once_with("put the block in the cup")
+
+
+def test_butler_nested_mute_joke_and_missing_item_speech() -> None:
+    from unittest.mock import MagicMock
+
+    from src.brain.gemini_hydrogen import PlanResponse
+    from src.main import DrinkAssistantOrchestrator
+    from src.voice.gatekeeper import VoiceGatekeeper
+
+    gk = VoiceGatekeeper({
+        "gemma_api_url": "http://127.0.0.1:9/v1/chat/completions",
+        "gemma_model": "gemma-4-E2B_q4_0-it",
+        "tts_api_url": "http://127.0.0.1:9/speak",
+        "mute_padding_s": 0.0,
+    })
+    with gk.suppress_listening():
+        assert gk.is_muted is True
+        with gk.suppress_listening():
+            assert gk.is_muted is True
+        # Still muted until outermost context exits
+        assert gk.is_muted is True
+    assert gk.is_muted is False
+
+    # Offline fallback returns a non-empty marshmallow joke
+    joke = gk.generate_marshmallow_joke(timeout_s=0.1)
+    assert len(joke) > 10
+
+    # Orchestrator speaks out loud when Gemini cannot see an item
+    cal = MatCalibration(
+        homography=np.diag([0.001, 0.001, 1.0]),
+        camera_position_m=(0.25, 0.0, 0.5),
+        image_width=1000,
+        image_height=1000,
+        reprojection_error_m=0.0,
+    )
+    mock_cams = MagicMock()
+    mock_cams.capture_overhead.return_value = np.zeros((10, 10, 3), dtype=np.uint8)
+    mock_cams.encode_jpeg.return_value = b"jpeg"
+    mock_brain = MagicMock()
+    mock_brain.plan_task.return_value = PlanResponse(
+        feasible=False,
+        spoken_reply="I cannot see any marshmallow on the mat right now.",
+        actions=[],
+    )
+    mock_gk = MagicMock()
+    orch = DrinkAssistantOrchestrator(
+        cfg={
+            "kinematics": _sample_kin_cfg(),
+            "workspace": _sample_workspace_cfg(),
+            "brain": {"max_retries": 0},
+        },
+        calibration=cal,
+        brain=mock_brain,
+        cameras=mock_cams,
+        arm=MagicMock(home_pose_deg={"shoulder_pan": 0.0}),
+        gatekeeper=mock_gk,
+        verify_drops=False,
+        mode="cocoa",
+    )
+    assert orch.handle_request("put a marshmallow in the cup") is False
+    mock_gk.speak.assert_called_once_with("I cannot see any marshmallow on the mat right now.")

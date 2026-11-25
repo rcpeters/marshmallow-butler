@@ -16,12 +16,12 @@ arm:
   move_duration_s: 1.4
   # Folded rest pose in degrees (tucked back & left behind Marker 1 so camera view of cup is clear)
   home_pose_deg:
-    shoulder_pan: -40.0
-    shoulder_lift: -92.0
-    elbow_flex: 170.0
-    wrist_flex: 80.0
-    wrist_roll: 0.0
-    gripper: 20.0
+    shoulder_pan: -5.4
+    shoulder_lift: -106.1
+    elbow_flex: 181.9
+    wrist_flex: -100.4
+    wrist_roll: 0.4
+    gripper: 19.9
   # Conservative joint software limits (degrees)
   joint_limits_deg:
     shoulder_pan: [-110.0, 110.0]
@@ -142,7 +142,24 @@ brain:
   max_retries: 1
 
 voice:
-  gemma_api_url: "${GEMMA_API_URL:-http://gemma-llm:8000/v1/chat/completions}"
-  gemma_model: "${GEMMA_MODEL:-gemma-4-e2b}"
-  tts_api_url: "${TTS_API_URL:-http://local-tts:8000/v1/audio/speech}"
-  mute_padding_s: 0.5
+  gemma_api_url: "${GEMMA_API_URL:-http://llamacpp-models-runner:9999/v1/chat/completions}"
+  gemma_model: "${GEMMA_MODEL:-gemma-4-E2B_q4_0-it}"
+  asr_api_url: "${ASR_API_URL:-http://audio-analytics-runner:8085/audio-analytics/v1/api}"
+  asr_ws_url: "${ASR_WS_URL:-ws://audio-analytics-runner:8085/stream}"
+  asr_model: "${ASR_MODEL:-whisper-small-quantized}"
+  asr_language: "${ASR_LANGUAGE:-en}"
+  asr_vad_ms: 700
+  tts_api_url: "${TTS_API_URL:-http://kokoro-tts:9100/speak}"
+  tts_voice: "${TTS_VOICE:-bm_george}"
+  tts_speed: 1.0
+  tts_lang: "${TTS_LANG:-en-gb}"
+  capture_device: "${ALSA_CAPTURE_DEVICE:-plughw:CARD=Array,DEV=0}"
+  playback_device: "${ALSA_PLAYBACK_DEVICE:-plughw:CARD=Device,DEV=0}"
+  sample_rate: 16000
+  channels: 1
+  wake_word_enabled: false
+  kws_api_url: "${KWS_API_URL:-http://ei-keyword-spot-runner:1337}"
+  kws_label: "hey_arduino"
+  kws_confidence: 0.80
+  kws_window_s: 12.0
+  mute_padding_s: 0.6

@@ -235,10 +235,25 @@ def build_cup_safe_waypoints(
     open_pct = float(profiles["open_pct"]) if open_pct_override is None else float(open_pct_override)
     close_pct = float(profiles[item_type]["close_pct"]) if close_pct_override is None else float(close_pct_override)
 
-    pre_grasp = ik.solve_topdown_ik(px, py, pz + pre_offset, gripper_pct=open_pct, wrist_roll_deg=wrist_roll_deg)
+    z_hover = pz + pre_offset
+    try:
+        pre_grasp = ik.solve_topdown_ik(px, py, z_hover, gripper_pct=open_pct, wrist_roll_deg=wrist_roll_deg)
+    except ValueError:
+        r_pick = math.hypot(px, py) - ik.shoulder_offset_x_m
+        span = ik.upper_arm_m + ik.forearm_m - 0.002
+        if abs(r_pick) >= span:
+            raise
+        dz_ceil = math.sqrt(span * span - r_pick * r_pick)
+        z_ceil = ik.base_height_m + dz_ceil - ik.wrist_to_tip_m - 0.002
+        z_hover = min(z_hover, z_ceil)
+        if z_hover < pz + 0.015:
+            raise
+        pre_grasp = ik.solve_topdown_ik(px, py, z_hover, gripper_pct=open_pct, wrist_roll_deg=wrist_roll_deg)
+
     descend = ik.solve_topdown_ik(px, py, pz, gripper_pct=open_pct, wrist_roll_deg=wrist_roll_deg)
     grasp = ik.solve_topdown_ik(px, py, pz, gripper_pct=close_pct, wrist_roll_deg=wrist_roll_deg)
 
+    approach_waypoints: list[Waypoint] = []
     lift_waypoints: list[Waypoint] = []
     try:
         lift_pick = ik.solve_topdown_ik(px, py, transit_z, gripper_pct=close_pct, wrist_roll_deg=wrist_roll_deg)
@@ -251,14 +266,23 @@ def build_cup_safe_waypoints(
         r_transit_max = min(ik.r_max, ik.shoulder_offset_x_m + math.sqrt(span * span - dz_t * dz_t) - 0.003)
         if r_transit_max < ik.r_min or r_transit_max >= pick_r:
             raise
+        scale = r_transit_max / pick_r
+        approach_waypoints.append(
+            Waypoint(
+                "APPROACH_CLEAR",
+                ik.solve_topdown_ik(
+                    px * scale, py * scale, transit_z, gripper_pct=open_pct, wrist_roll_deg=wrist_roll_deg
+                ),
+                duration_s=1.0,
+            )
+        )
         lift_waypoints.append(
             Waypoint(
                 "LIFT_VERTICAL",
-                ik.solve_topdown_ik(px, py, pz + pre_offset, gripper_pct=close_pct, wrist_roll_deg=wrist_roll_deg),
+                ik.solve_topdown_ik(px, py, z_hover, gripper_pct=close_pct, wrist_roll_deg=wrist_roll_deg),
                 duration_s=0.8,
             )
         )
-        scale = r_transit_max / pick_r
         lift_pick = ik.solve_topdown_ik(
             px * scale, py * scale, transit_z, gripper_pct=close_pct, wrist_roll_deg=wrist_roll_deg
         )
@@ -270,6 +294,7 @@ def build_cup_safe_waypoints(
     retract_cup = ik.solve_topdown_ik(cx, cy, transit_z, gripper_pct=open_pct, wrist_roll_deg=0.0)
 
     return [
+        *approach_waypoints,
         Waypoint("PRE_GRASP", pre_grasp),
         Waypoint("DESCEND_TO_ITEM", descend, duration_s=0.9),
         Waypoint(f"GRASP_{item_type.upper()}", grasp, duration_s=0.6),

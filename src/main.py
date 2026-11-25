@@ -6,7 +6,8 @@ import argparse
 from dataclasses import dataclass
 import logging
 from pathlib import Path
-from typing import Any, Literal
+import threading
+from typing import Any, Iterator, Literal
 
 import cv2
 
@@ -33,6 +34,7 @@ from src.skills.ik_controller import (
     compute_open_pct_for_width,
     compute_wrist_roll_deg,
 )
+from src.voice.audio_pipeline import WakeWordDetector, WhisperASRClient
 from src.voice.gatekeeper import VoiceGatekeeper
 
 logger = logging.getLogger(__name__)
@@ -260,33 +262,75 @@ class DrinkAssistantOrchestrator:
 
         contact_cfg = ws.get("gripper_profiles", {}).get("contact_detection") or {}
         apply_types = contact_cfg.get("item_types")
+        planned_trajectories = []
         for action, t in resolved_list:
-            waypoints = build_cup_safe_waypoints(
-                ik=self.kinematics,
-                pick_xyz=t.pick_xyz,
-                cup_xyz=t.cup_xyz,
-                item_type=action.item_type,
-                workspace_cfg=ws,
-                home_pose_deg=self.arm.home_pose_deg,
-                close_pct_override=t.close_pct,
-                open_pct_override=t.open_pct,
-                wrist_roll_deg=t.wrist_roll_deg,
+            try:
+                waypoints = build_cup_safe_waypoints(
+                    ik=self.kinematics,
+                    pick_xyz=t.pick_xyz,
+                    cup_xyz=t.cup_xyz,
+                    item_type=action.item_type,
+                    workspace_cfg=ws,
+                    home_pose_deg=self.arm.home_pose_deg,
+                    close_pct_override=t.close_pct,
+                    open_pct_override=t.open_pct,
+                    wrist_roll_deg=t.wrist_roll_deg,
+                )
+            except ValueError as exc:
+                logger.warning("Target out of safe IK reach: %s", exc)
+                self._speak(
+                    "Pardon me, either the cup or that item is slightly beyond my arm's reach. "
+                    "Could you nudge it a touch closer?"
+                )
+                return False
+            planned_trajectories.append((action, waypoints))
+
+        joke_thread: threading.Thread | None = None
+        if self.gatekeeper is not None and any(
+            action.item_type == "marshmallow" for action, _ in planned_trajectories
+        ):
+            gk = self.gatekeeper
+
+            def _tell_marshmallow_joke() -> None:
+                joke = gk.generate_marshmallow_joke()
+                print(f"[ROBOT] {joke}")
+                gk.speak(joke)
+
+            joke_thread = threading.Thread(
+                target=_tell_marshmallow_joke,
+                daemon=True,
+                name="MarshmallowJoke",
             )
-            use_contact = bool(contact_cfg.get("enabled", False)) and (
-                not apply_types or action.item_type in apply_types
-            )
-            action_contact = {**contact_cfg, "enabled": use_contact} if use_contact else None
-            self.arm.execute_waypoints(waypoints, contact_cfg=action_contact)
+            joke_thread.start()
+
+        try:
+            for action, waypoints in planned_trajectories:
+                use_contact = bool(contact_cfg.get("enabled", False)) and (
+                    not apply_types or action.item_type in apply_types
+                )
+                action_contact = {**contact_cfg, "enabled": use_contact} if use_contact else None
+                self.arm.execute_waypoints(waypoints, contact_cfg=action_contact)
+        finally:
+            if joke_thread is not None:
+                joke_thread.join(timeout=20.0)
         return True
 
     def handle_request(self, request_text: str) -> bool:
         """Run one complete on-demand plan -> execute -> verify cycle for a request."""
-        frame = self.cameras.capture_overhead()
-        overhead_jpeg = self.cameras.encode_jpeg(frame)
-        plan = self.brain.plan_task(overhead_jpeg, request_text, mode=self.mode)
+        try:
+            frame = self.cameras.capture_overhead()
+            overhead_jpeg = self.cameras.encode_jpeg(frame)
+            plan = self.brain.plan_task(overhead_jpeg, request_text, mode=self.mode)
+        except Exception as exc:
+            logger.warning("Failed to capture or plan request '%s': %s", request_text, exc)
+            self._speak("Beg pardon, I had trouble checking the tabletop camera just now.")
+            return False
 
         if not plan.feasible or not plan.actions:
-            self._speak(plan.spoken_reply or "I couldn't find a safe match and cup on the mat.")
+            self._speak(
+                plan.spoken_reply
+                or "Beg pardon, I cannot see both that item and a cup on the mat right now."
+            )
             return False
 
         max_retries = int(self.cfg["brain"].get("max_retries", 1))
@@ -304,18 +348,29 @@ class DrinkAssistantOrchestrator:
                 self._speak(plan.spoken_reply)
                 return True
 
-            verify_frame = self.cameras.capture_overhead()
-            verify = self.brain.verify_drop(self.cameras.encode_jpeg(verify_frame), request_text)
+            try:
+                verify_frame = self.cameras.capture_overhead()
+                verify = self.brain.verify_drop(self.cameras.encode_jpeg(verify_frame), request_text)
+            except Exception as exc:
+                logger.warning("Verification check failed: %s", exc)
+                self._speak(plan.spoken_reply or "There you are, enjoy!")
+                return True
+
             if verify.success:
                 self._speak(verify.spoken_reply or plan.spoken_reply)
                 return True
 
             logger.warning("Verification failed (attempt %d): %s", attempt + 1, verify.reason)
             if attempt < max_retries:
-                replan = self.brain.plan_task(self.cameras.encode_jpeg(verify_frame), request_text, mode=self.mode)
-                if replan.feasible and replan.actions:
-                    plan = replan
-                    continue
+                try:
+                    replan = self.brain.plan_task(
+                        self.cameras.encode_jpeg(verify_frame), request_text, mode=self.mode
+                    )
+                    if replan.feasible and replan.actions:
+                        plan = replan
+                        continue
+                except Exception as exc:
+                    logger.warning("Replan attempt failed: %s", exc)
             self._speak(verify.spoken_reply or "Sorry, I had trouble dropping that into the cup.")
             return False
 
@@ -347,34 +402,101 @@ def run_cli(orchestrator: DrinkAssistantOrchestrator) -> None:
         orchestrator.handle_request(text)
 
 
-def run_voice_loop(orchestrator: DrinkAssistantOrchestrator, gatekeeper: VoiceGatekeeper) -> None:
-    """Reads room transcripts (from ASR pipe/stdin), gates with local Gemma, and dispatches."""
-    print(f"Voice gatekeeper active (mode={orchestrator.mode}). Waiting for room transcripts...")
-    while True:
-        try:
-            transcript = input().strip()
-        except (EOFError, KeyboardInterrupt):
-            break
-        if not transcript or gatekeeper.is_muted:
-            continue
+def handle_voice_transcript(
+    orchestrator: DrinkAssistantOrchestrator,
+    gatekeeper: VoiceGatekeeper,
+    transcript: str,
+) -> bool:
+    """Evaluate one transcript with local Gemma and dispatch or switch mode. Returns True if handled."""
+    text = transcript.strip()
+    if not text or gatekeeper.is_muted:
+        return False
 
-        decision = gatekeeper.evaluate_transcript(transcript, mode=orchestrator.mode)
-        if decision.mode_switch in ("cocoa", "toy"):
-            orchestrator.mode = decision.mode_switch
-            logger.info("Switched assistant mode -> %s", orchestrator.mode)
-            if decision.reply:
-                gatekeeper.speak(decision.reply)
-            continue
-
-        if not decision.dispatch:
-            if decision.reply:
-                gatekeeper.speak(decision.reply)
-            logger.debug("Ignored non-dispatch chatter: %s", transcript)
-            continue
-
+    logger.info("Heard transcript: %s", text)
+    decision = gatekeeper.evaluate_transcript(text, mode=orchestrator.mode)
+    if decision.mode_switch in ("cocoa", "toy"):
+        orchestrator.mode = decision.mode_switch
+        logger.info("Switched assistant mode -> %s", orchestrator.mode)
         if decision.reply:
             gatekeeper.speak(decision.reply)
-        orchestrator.handle_request(decision.request_text or transcript)
+        return True
+
+    if not decision.dispatch:
+        if decision.reply:
+            gatekeeper.speak(decision.reply)
+        logger.debug("Ignored non-dispatch chatter: %s", text)
+        return False
+
+    if decision.reply:
+        gatekeeper.speak(decision.reply)
+    orchestrator.handle_request(decision.request_text or text)
+    return True
+
+
+def _iter_live_transcripts(
+    voice_cfg: dict[str, Any],
+    gatekeeper: VoiceGatekeeper,
+    stop_event: threading.Event,
+    wake_word: bool,
+) -> Iterator[str]:
+    """Yield transcribed room utterances from Whisper ASR (optionally gated by KWS)."""
+    asr = WhisperASRClient(voice_cfg)
+    if not wake_word:
+        yield from asr.iter_utterances(lambda: gatekeeper.is_muted, stop_event=stop_event)
+        return
+
+    detector = WakeWordDetector(voice_cfg)
+    window_s = float(voice_cfg.get("kws_window_s", 12.0))
+    while not stop_event.is_set():
+        if detector.wait_for_trigger(lambda: gatekeeper.is_muted, stop_event):
+            logger.info("Listening for command (%.0fs window)...", window_s)
+            utterance = asr.listen_once(lambda: gatekeeper.is_muted, stop_event, timeout_s=window_s)
+            if utterance:
+                yield utterance
+
+
+def run_voice_loop(
+    orchestrator: DrinkAssistantOrchestrator,
+    gatekeeper: VoiceGatekeeper,
+    use_stdin: bool = False,
+    wake_word: bool | None = None,
+) -> None:
+    """Listen via live Whisper ASR (or stdin), gate with local Gemma, and dispatch."""
+    voice_cfg = orchestrator.cfg["voice"]
+    use_wake_word = bool(voice_cfg.get("wake_word_enabled", False)) if wake_word is None else wake_word
+    gatekeeper.warmup_tts()
+    gatekeeper.warmup_llm()
+    ready_greeting = (
+        "At your service. Mr. S More here, ready to serve cocoa treats."
+        if orchestrator.mode == "cocoa"
+        else "At your service. Mr. S More here in toy mode, ready to tidy up."
+    )
+    print(f"[ROBOT] {ready_greeting}")
+    gatekeeper.speak(ready_greeting)
+
+    if use_stdin:
+        print(f"Voice gatekeeper active (stdin mode, mode={orchestrator.mode}). Waiting for transcripts...")
+        while True:
+            try:
+                transcript = input().strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+            handle_voice_transcript(orchestrator, gatekeeper, transcript)
+        return
+
+    print(
+        f"Voice gatekeeper active (mic={voice_cfg.get('capture_device', 'default')}, "
+        f"speaker={voice_cfg.get('playback_device', 'default')}, "
+        f"wake_word={use_wake_word}, mode={orchestrator.mode}). Listening..."
+    )
+    stop_event = threading.Event()
+    try:
+        for transcript in _iter_live_transcripts(voice_cfg, gatekeeper, stop_event, use_wake_word):
+            handle_voice_transcript(orchestrator, gatekeeper, transcript)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
 
 
 def main() -> None:
@@ -383,6 +505,8 @@ def main() -> None:
     parser.add_argument("--calibration", default="config/calibration.yaml")
     parser.add_argument("--mode", choices=["cli", "voice"], default="cli")
     parser.add_argument("--toy-mode", action="store_true", help="Start in general Toy Mode instead of Cocoa Mode.")
+    parser.add_argument("--stdin", action="store_true", help="In voice mode, read transcripts from stdin instead of mic/Whisper ASR.")
+    parser.add_argument("--wake-word", action="store_true", help="Require 'Hey Arduino' KWS trigger before opening Whisper ASR.")
     parser.add_argument("--dry-run", action="store_true", help="Plan and solve IK without moving hardware.")
     parser.add_argument("--no-verify", action="store_true", help="Skip post-drop Gemini verification.")
     args = parser.parse_args()
@@ -416,7 +540,12 @@ def main() -> None:
         )
         if args.mode == "voice":
             assert gatekeeper is not None
-            run_voice_loop(orchestrator, gatekeeper)
+            run_voice_loop(
+                orchestrator,
+                gatekeeper,
+                use_stdin=args.stdin,
+                wake_word=True if args.wake_word else None,
+            )
         else:
             run_cli(orchestrator)
 
